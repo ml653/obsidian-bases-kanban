@@ -90,6 +90,7 @@ export interface KeyboardMoveCallbacks {
 	) => void;
 	deleteCard: (entryPath: string, focusPath: string | null) => Promise<void>;
 	openQuickAddForColumn: (columnValue: string, swimlaneValue: string | null) => void;
+	openCardInPopout: (entryPath: string) => void;
 }
 
 /**
@@ -194,6 +195,19 @@ export function handleBoardKeydown(e: KeyboardEvent, boardEl: HTMLElement, cb: K
 	if (!(e.target instanceof Element)) return;
 	const target = e.target;
 	const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+
+	// Enter — open focused card in a popout window (not while editing).
+	if (e.key === 'Enter' && !isInput && !isMod) {
+		const cardEl = target.closest<HTMLElement>(`.${CSS_CLASSES.CARD}`);
+		if (cardEl) {
+			const entryPath = cardEl.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH);
+			if (entryPath) {
+				e.preventDefault();
+				cb.openCardInPopout(entryPath);
+			}
+		}
+		return;
+	}
 
 	// Ctrl+Delete / Ctrl+Backspace — trash the focused card.
 	if ((e.key === 'Delete' || e.key === 'Backspace') && isMod) {

@@ -204,6 +204,7 @@ export class KanbanView extends BasesView {
 				reorderCardInColumn: (path, col, lane, dir) => this.reorderCardInColumn(path, col, lane, dir),
 				deleteCard: (path, focusPath) => this.deleteCard(path, focusPath),
 				openQuickAddForColumn: (col, lane) => this.openQuickAddForColumn(col, lane),
+				openCardInPopout: (path) => this.openCardInPopout(path),
 			});
 		});
 
@@ -1569,6 +1570,11 @@ export class KanbanView extends BasesView {
 			if (--frames > 0) window.requestAnimationFrame(tick);
 		};
 		window.requestAnimationFrame(tick);
+	}
+
+	private openCardInPopout(entryPath: string): void {
+		if (!this.app?.workspace) return;
+		void this.app.workspace.openLinkText(entryPath, '', 'tab');
 	}
 
 	private setActiveCard(path: string | null): void {

@@ -13,7 +13,10 @@ export interface QuickAddCtx {
 
 export interface QuickAddCallbacks {
 	createFileForView: (path: string, setFrontmatter: (fm: Record<string, unknown>) => void) => Promise<void>;
-	moveFileToFolder: (baseFileName: string, targetFolder: string) => Promise<void>;
+	/** previousPaths: snapshot of vault markdown paths taken before createFileForView. */
+	moveFileToFolder: (previousPaths: Set<string>, baseFileName: string, targetFolder: string) => Promise<void>;
+	/** Return current vault markdown file paths for snapshotting. */
+	getMarkdownFilePaths: () => Set<string>;
 }
 
 function sanitizeBaseFileName(title: string): string {
@@ -24,6 +27,34 @@ function sanitizeBaseFileName(title: string): string {
 		.replace(/\s+/g, ' ')
 		.replace(/[.\s]+$/g, '')
 		.trim();
+}
+
+function todayDateFolder(): { yyyy: string; mm: string; dd: string } {
+	const d = new Date();
+	return {
+		yyyy: String(d.getFullYear()),
+		mm: String(d.getMonth() + 1).padStart(2, '0'),
+		dd: String(d.getDate()).padStart(2, '0'),
+	};
+}
+
+/**
+ * Build the dated subfolder path: baseFolder/YYYY/MM/DD
+ */
+export function buildDateFolder(baseFolder: string): string {
+	const { yyyy, mm, dd } = todayDateFolder();
+	return `${baseFolder}/${yyyy}/${mm}/${dd}`;
+}
+
+/**
+ * Build a unique filename (no extension) for the card.
+ * Uses title as-is; on collision appends (2), (3), …
+ */
+export function buildUniqueFileName(title: string, targetFolder: string, existingPaths: Set<string>): string {
+	const candidate = (n: number) => (n <= 1 ? title : `${title} (${n})`);
+	let n = 1;
+	while (existingPaths.has(`${targetFolder}/${candidate(n)}.md`)) n++;
+	return candidate(n);
 }
 
 function getWritableFrontmatterPropertyName(propertyId: BasesPropertyId | null): string | null {
@@ -76,14 +107,24 @@ export async function createQuickAddCard(
 		return;
 	}
 
-	const targetFolder = ctx.quickAddFolder;
-	if (!targetFolder) {
+	const baseFolder = ctx.quickAddFolder;
+	if (!baseFolder) {
 		new Notice('Quick add requires a folder to be configured.');
 		return;
 	}
-	if (!ctx.app?.vault.getFolderByPath(targetFolder)) {
-		new Notice(`Quick add folder not found: ${targetFolder}`);
+	if (!ctx.app?.vault.getFolderByPath(baseFolder)) {
+		new Notice(`Quick add folder not found: ${baseFolder}`);
 		return;
+	}
+
+	// Ensure YYYY/MM/DD subfolder exists.
+	const targetFolder = buildDateFolder(baseFolder);
+	if (!ctx.app.vault.getFolderByPath(targetFolder)) {
+		try {
+			await ctx.app.vault.createFolder(targetFolder);
+		} catch {
+			// May already exist if created concurrently — continue.
+		}
 	}
 
 	const setFrontmatter = (frontmatter: Record<string, unknown>): void => {
@@ -102,8 +143,10 @@ export async function createQuickAddCard(
 	};
 
 	try {
-		await cb.createFileForView(baseFileName, setFrontmatter);
-		await cb.moveFileToFolder(baseFileName, targetFolder);
+		const previousPaths = cb.getMarkdownFilePaths();
+		const uniqueFileName = buildUniqueFileName(baseFileName, targetFolder, previousPaths);
+		await cb.createFileForView(uniqueFileName, setFrontmatter);
+		await cb.moveFileToFolder(previousPaths, uniqueFileName, targetFolder);
 		closeNativeNewItemPopover(ctx.doc);
 	} catch (error) {
 		console.error('Error creating kanban card:', error);
@@ -124,7 +167,7 @@ export function createAddButton(
 		swimlaneValue ? `Add card to column: ${columnValue} in lane: ${swimlaneValue}` : `Add card to column: ${columnValue}`,
 	);
 	btn.setAttribute('role', 'button');
-	btn.setAttribute('tabindex', '0');
+	btn.setAttribute('tabindex', '-1');
 	setIcon(btn, 'plus');
 
 	const open = () => {

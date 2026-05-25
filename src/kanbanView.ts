@@ -28,6 +28,8 @@ import {
 	type RowRenderCtx,
 	type RowCallbacks,
 } from './components/row.ts';
+import { handleBoardKeydown } from './components/keyboard.ts';
+import { QuickAddModal } from './quickAddModal.ts';
 import type { TFile } from 'obsidian';
 import Sortable from 'sortablejs';
 import {
@@ -150,6 +152,7 @@ export class KanbanView extends BasesView {
 	 */
 	private _dragging = false;
 	private _activeCardPath: string | null = null;
+	private _keyboardFocusPath: string | null = null;
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, legacyData: LegacyData | null = null) {
 		super(controller);
@@ -190,6 +193,18 @@ export class KanbanView extends BasesView {
 			const cardEl = linkEl.closest(`[${DATA_ATTRIBUTES.ENTRY_PATH}]`);
 			const sourcePath = cardEl.instanceOf(HTMLElement) ? (cardEl.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) ?? '') : '';
 			this.triggerHoverPreview(href, sourcePath, evt, linkEl);
+		});
+
+		// Keyboard navigation: arrow keys between cards, Cmd/Ctrl+arrow to move cards.
+		this.containerEl.addEventListener('keydown', (e) => {
+			const boardEl = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
+			if (!boardEl) return;
+			handleBoardKeydown(e, boardEl, {
+				moveCardToColumn: (path, col) => this.moveCardToColumn(path, col),
+				reorderCardInColumn: (path, col, lane, dir) => this.reorderCardInColumn(path, col, lane, dir),
+				deleteCard: (path, focusPath) => this.deleteCard(path, focusPath),
+				openQuickAddForColumn: (col, lane) => this.openQuickAddForColumn(col, lane),
+			});
 		});
 
 		this._debouncedRender = debounce(() => {
@@ -1031,7 +1046,24 @@ export class KanbanView extends BasesView {
 			onHoverPreview: (lt, sp, e, el) => this.triggerHoverPreview(lt, sp, e, el),
 			onSetActiveCard: (path) => this.setActiveCard(path),
 			onOpenInBackgroundTab: (file) => this.openInBackgroundTab(file),
+			onFocusCard: (path) => {
+				this._keyboardFocusPath = path;
+			},
+			onRenameCard: (file, newName) => this.renameCard(file, newName),
 		};
+	}
+
+	private async renameCard(file: TFile, newName: string): Promise<void> {
+		if (!this.app?.fileManager) return;
+		const sanitized = newName.replace(/[\\/:*?"<>|]/g, '-').trim();
+		if (!sanitized) return;
+		const newPath = normalizePath(`${file.parent?.path ?? ''}/${sanitized}.md`);
+		try {
+			await this.app.fileManager.renameFile(file, newPath);
+		} catch (error) {
+			console.error('Error renaming card:', error);
+			new Notice('Could not rename card.');
+		}
 	}
 
 	private createCard(entry: BasesEntry): HTMLElement {
@@ -1117,11 +1149,23 @@ export class KanbanView extends BasesView {
 	private _buildQuickAddCallbacks(): QuickAddCallbacks {
 		return {
 			createFileForView: (path, setFm) => this.createFileForView(path, setFm),
-			moveFileToFolder: (baseFileName, targetFolder) => this._moveCreatedFileToFolder(baseFileName, targetFolder),
+			getMarkdownFilePaths: () => new Set(this.app?.vault.getMarkdownFiles().map((f) => f.path) ?? []),
+			moveFileToFolder: (prev, baseFileName, targetFolder) =>
+				this._moveCreatedFileToFolder(prev, baseFileName, targetFolder),
 		};
 	}
 
-	private async _moveCreatedFileToFolder(baseFileName: string, targetFolder: string): Promise<void> {
+	/**
+	 * Snapshot vault markdown files BEFORE calling createFileForView, then call
+	 * this to find and move the newly created file into targetFolder.
+	 * Using a pre/post diff avoids relying on basename matching (which breaks
+	 * when Bases deduplicates the name, e.g. "Card 1.md").
+	 */
+	private async _moveCreatedFileToFolder(
+		previousPaths: Set<string>,
+		baseFileName: string,
+		targetFolder: string,
+	): Promise<void> {
 		if (!this.app?.vault || !this.app?.fileManager) return;
 
 		const folder = this.app.vault.getFolderByPath(targetFolder);
@@ -1130,12 +1174,33 @@ export class KanbanView extends BasesView {
 			return;
 		}
 
-		// Find the file that was just created by createFileForView.
-		// It will be a markdown file whose basename matches baseFileName.
-		const created = this.app.vault.getMarkdownFiles().find((f) => f.basename === baseFileName);
+		// createFileForView may resolve before the file is flushed to the vault
+		// index. Poll until the new file appears (up to ~2 s in 50 ms steps).
+		// We match by exact basename since we control the dated filename.
+		const findCreated = () =>
+			this.app?.vault.getMarkdownFiles().find((f) => !previousPaths.has(f.path) && f.basename === baseFileName) ?? null;
+
+		let created = findCreated();
+		if (!created) {
+			await new Promise<void>((resolve) => {
+				const INTERVAL = 50;
+				const MAX_ATTEMPTS = 40; // 2 s total
+				let attempts = 0;
+				const poll = () => {
+					created = findCreated();
+					if (created || ++attempts >= MAX_ATTEMPTS) {
+						resolve();
+					} else {
+						window.setTimeout(poll, INTERVAL);
+					}
+				};
+				window.setTimeout(poll, INTERVAL);
+			});
+		}
+
 		if (!created) return;
 
-		// Only move if it's not already in the target folder.
+		// Already in the right place — nothing to do.
 		if (created.parent?.path === targetFolder) return;
 
 		const destPath = normalizePath(`${targetFolder}/${created.name}`);
@@ -1332,6 +1397,126 @@ export class KanbanView extends BasesView {
 		}
 	}
 
+	/**
+	 * Move a card to a different column by updating its group-by frontmatter
+	 * property.  Used by keyboard navigation (Cmd/Ctrl + Arrow).
+	 */
+	private async moveCardToColumn(entryPath: string, newColumnValue: string): Promise<void> {
+		if (!this._prefsPropertyId || !this.app?.fileManager) return;
+		const entry = this._entryMap.get(entryPath);
+		if (!entry) return;
+
+		// Preserve focus on this card after the re-render triggered by the write.
+		this._keyboardFocusPath = entryPath;
+
+		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
+		const columnValueToSet = newColumnValue === UNCATEGORIZED_LABEL ? '' : newColumnValue;
+
+		try {
+			await this.app.fileManager.processFrontMatter(entry.file, (frontmatter: Record<string, unknown>) => {
+				if (columnValueToSet === '') {
+					delete frontmatter[columnPropertyName];
+				} else {
+					frontmatter[columnPropertyName] = columnValueToSet;
+				}
+			});
+		} catch (error) {
+			console.error('Error moving card via keyboard:', error);
+			this.render();
+		}
+	}
+
+	/**
+	 * Reorder a card up or down within its column via keyboard (Cmd/Ctrl+Up/Down).
+	 * Updates the DOM immediately and persists the new card order.
+	 */
+	private reorderCardInColumn(
+		entryPath: string,
+		columnValue: string,
+		swimlaneValue: string | null,
+		direction: 'up' | 'down',
+	): void {
+		const cardEl = this.findCardEl(entryPath);
+		if (!cardEl) return;
+
+		const columnSelector = `.${CSS_CLASSES.COLUMN}`;
+		const columnEl = cardEl.closest<HTMLElement>(columnSelector);
+		if (!columnEl) return;
+
+		const body = columnEl.querySelector<HTMLElement>(`.${CSS_CLASSES.COLUMN_BODY}`);
+		if (!body) return;
+
+		const cards = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`));
+		const idx = cards.indexOf(cardEl);
+		if (idx === -1) return;
+
+		const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+		if (targetIdx < 0 || targetIdx >= cards.length) return;
+
+		const sibling = cards[targetIdx];
+
+		// Swap in DOM
+		if (direction === 'up') {
+			body.insertBefore(cardEl, sibling);
+		} else {
+			body.insertBefore(cardEl, sibling.nextSibling);
+		}
+
+		// Persist the new order
+		this._keyboardFocusPath = entryPath;
+		const newOrder = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`))
+			.map((c) => c.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH))
+			.filter((p): p is string => p !== null);
+
+		const key = this.cardOrderKey(swimlaneValue, columnValue);
+		this._prefs.cardOrders[key] = newOrder;
+		this._persistPrefs();
+
+		// Re-focus immediately since we moved the DOM node (focus stays on the element)
+		cardEl.focus({ preventScroll: true });
+		cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+	}
+
+	/** Trash the card file (Ctrl+Delete). Moves focus to focusPath after deletion. */
+	private async deleteCard(entryPath: string, focusPath: string | null): Promise<void> {
+		if (!this.app?.fileManager) return;
+		const entry = this._entryMap.get(entryPath);
+		if (!entry) return;
+
+		const title = entry.file.basename;
+		this._keyboardFocusPath = focusPath;
+
+		try {
+			await this.app.fileManager.trashFile(entry.file);
+			new Notice(`Deleted "${title}"`);
+		} catch (error) {
+			console.error('Error deleting card:', error);
+			new Notice('Could not delete card.');
+		}
+	}
+
+	/**
+	 * Open the quick-add modal for a given column (Ctrl+A).
+	 * Opens the modal directly with full ctx/callbacks.
+	 */
+	private openQuickAddForColumn(columnValue: string, swimlaneValue: string | null): void {
+		if (!this.app) return;
+		const ctx = this._buildQuickAddCtx();
+		const cb = this._buildQuickAddCallbacks();
+		new QuickAddModal(this.app, {
+			columnValue,
+			swimlaneValue,
+			onSubmit: (title) => createQuickAddCardEl(title, columnValue, swimlaneValue, ctx, cb),
+			onClose: () => {
+				// Restore focus to the board so Ctrl+A can fire again immediately.
+				const focusTarget =
+					(this._keyboardFocusPath && this.findCardEl(this._keyboardFocusPath)) ??
+					this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.CARD}`);
+				focusTarget?.focus({ preventScroll: true });
+			},
+		}).open();
+	}
+
 	private findCardEl(path: string): HTMLElement | null {
 		return (
 			Array.from(this.containerEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`)).find(
@@ -1397,8 +1582,18 @@ export class KanbanView extends BasesView {
 	}
 
 	private reapplyActiveCard(): void {
-		if (!this._activeCardPath) return;
-		this.findCardEl(this._activeCardPath)?.classList.add(CSS_CLASSES.CARD_ACTIVE);
+		if (this._activeCardPath) {
+			this.findCardEl(this._activeCardPath)?.classList.add(CSS_CLASSES.CARD_ACTIVE);
+		}
+		if (this._keyboardFocusPath) {
+			const cardEl = this.findCardEl(this._keyboardFocusPath);
+			if (cardEl) {
+				window.requestAnimationFrame(() => cardEl.focus({ preventScroll: true }));
+			} else {
+				// Card no longer exists (e.g. moved to a different view) — clear.
+				this._keyboardFocusPath = null;
+			}
+		}
 	}
 
 	private didSortableIndexChange(evt: Sortable.SortableEvent): boolean {

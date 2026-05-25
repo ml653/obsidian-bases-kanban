@@ -283,7 +283,7 @@ describe('Data Rendering - Column Rendering', () => {
 		const addBtn = doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`);
 		assert.ok(addBtn, 'Doing column should have a quick add button');
 		assert.strictEqual(addBtn?.getAttribute('aria-label'), 'Add card to column: Doing');
-		assert.strictEqual(addBtn?.getAttribute('tabindex'), '0');
+		assert.strictEqual(addBtn?.getAttribute('tabindex'), '-1');
 		assert.ok(addBtn?.querySelector('[data-icon="plus"]'), 'Quick add button should render the plus icon');
 	});
 
@@ -364,9 +364,10 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('quickAddFolder', 'cards');
 
-		// Simulate the file that createFileForView creates so moveFileToFolder can find it
+		// Before createFileForView: vault is empty. After: file appears.
 		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
-		(app.vault as any).getMarkdownFiles = () => [createdFile];
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
 
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
@@ -392,7 +393,8 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.set('quickAddFolder', 'cards');
 
 		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
-		(app.vault as any).getMarkdownFiles = () => [createdFile];
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
 
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
@@ -417,7 +419,8 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.set('quickAddFolder', 'cards');
 
 		const createdFile = createMockTFile('New Lane Task.md', 'New Lane Task', { path: '', name: '' });
-		(app.vault as any).getMarkdownFiles = () => [createdFile];
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
 
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
@@ -447,7 +450,8 @@ describe('Data Rendering - Column Rendering', () => {
 
 		// File is created in the target folder already — no rename needed
 		const createdFile = createMockTFile('energy/New Task.md', 'New Task', { path: 'energy', name: 'energy' });
-		(app.vault as any).getMarkdownFiles = () => [createdFile];
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
 
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
@@ -694,7 +698,28 @@ describe('Data Rendering - Card Rendering', () => {
 		);
 	});
 
-	test('Card click handler opens file in workspace', () => {
+	test('Card click handler starts inline title edit (not open file)', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Card should exist');
+
+		card.click();
+
+		// Regular click should NOT open the note — it starts inline editing
+		assert.strictEqual(app.workspace.openLinkText.calls.length, 0, 'openLinkText should not be called on regular click');
+		// The inline edit input should appear
+		assert.ok(card.querySelector('.obk-card-title-input'), 'Inline edit input should appear');
+	});
+
+	test('Pencil button click opens file in workspace', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -708,20 +733,12 @@ describe('Data Rendering - Card Rendering', () => {
 		assert.ok(card, 'Card should exist');
 
 		const entryPath = card.getAttribute('data-entry-path');
-		card.click();
+		const pencilBtn = card.querySelector('.obk-card-edit-btn') as HTMLElement;
+		assert.ok(pencilBtn, 'Pencil button should exist');
+		pencilBtn.click();
 
-		// Verify openLinkText was called in current leaf
 		assert.strictEqual(app.workspace.openLinkText.calls.length, 1, 'openLinkText should be called');
-		assert.strictEqual(
-			app.workspace.openLinkText.calls[0][0],
-			entryPath,
-			'openLinkText should be called with entry path',
-		);
-		assert.strictEqual(
-			app.workspace.openLinkText.calls[0][2],
-			false,
-			'openLinkText should open in current leaf without modifier',
-		);
+		assert.strictEqual(app.workspace.openLinkText.calls[0][0], entryPath, 'should open correct file');
 	});
 
 	test('Ctrl+click on card opens file in new leaf', () => {
@@ -2429,7 +2446,7 @@ describe('Internal Link Click Handling', () => {
 		);
 	});
 
-	test('Clicking the card body (not a link) still opens the note', () => {
+	test('Clicking the card body (not a link) starts inline title edit', () => {
 		const cards = Array.from(view.containerEl.querySelectorAll('.obk-card')) as HTMLElement[];
 		const taskACard = cards.find((c) => c.getAttribute('data-entry-path') === 'notes/Task A.md');
 		assert.ok(taskACard, 'Task A card should exist');
@@ -2439,12 +2456,9 @@ describe('Internal Link Click Handling', () => {
 
 		title.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
 
-		assert.strictEqual(app.workspace.openLinkText.calls.length, 1, 'openLinkText should be called once');
-		assert.strictEqual(
-			app.workspace.openLinkText.calls[0][0],
-			'notes/Task A.md',
-			'Clicking card body should open the card note',
-		);
+		// Regular click starts inline editing, not openLinkText
+		assert.strictEqual(app.workspace.openLinkText.calls.length, 0, 'openLinkText should not be called on click');
+		assert.ok(taskACard?.querySelector('.obk-card-title-input'), 'Inline edit input should appear');
 	});
 
 	test('Middle-click on an internal link opens the linked note in a background tab', () => {

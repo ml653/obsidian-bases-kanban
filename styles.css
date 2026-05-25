@@ -450,6 +450,7 @@
 
 /* Kanban Card */
 .obk-card {
+	position: relative;
 	background: var(--background-primary);
 	border: 1px solid
 		color-mix(in srgb, var(--obk-column-accent-color, transparent) 15%, var(--background-modifier-border));
@@ -479,6 +480,66 @@
 .obk-card--active {
 	border-color: var(--interactive-accent);
 	box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+}
+
+.obk-card-edit-btn {
+	position: absolute;
+	top: 50%;
+	right: 8px;
+	transform: translateY(-50%);
+	width: 26px;
+	height: 26px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 17px;
+	color: var(--text-muted);
+	border-radius: 4px;
+	cursor: pointer;
+	opacity: 0;
+	transition:
+		opacity 0.15s ease,
+		background 0.15s ease;
+}
+
+.obk-card:hover .obk-card-edit-btn,
+.obk-card:focus-within .obk-card-edit-btn {
+	opacity: 1;
+}
+
+.obk-card-edit-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.obk-card--editing .obk-card-title,
+.obk-card--editing .obk-card-edit-btn {
+	display: none;
+}
+
+.obk-card-title-input {
+	width: 100%;
+	background: var(--background-primary);
+	border: 1px solid var(--interactive-accent);
+	border-radius: 4px;
+	padding: 2px 4px;
+	font-size: var(--font-text-size);
+	font-family: inherit;
+	color: var(--text-normal);
+	box-sizing: border-box;
+	outline: none;
+}
+
+.obk-card:focus {
+	outline: none;
+}
+
+.obk-card:focus-visible {
+	outline: none;
+	border-color: var(--interactive-accent);
+	box-shadow:
+		0 0 0 2px var(--background-primary),
+		0 0 0 4px var(--interactive-accent);
 }
 
 .obk-card-cover {

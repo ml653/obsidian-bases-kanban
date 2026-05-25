@@ -6,6 +6,7 @@ export interface QuickAddModalOptions {
 	columnValue: string;
 	swimlaneValue: string | null;
 	onSubmit: (title: string) => Promise<void> | void;
+	onClose?: () => void;
 }
 
 export class QuickAddModal extends Modal {
@@ -52,12 +53,14 @@ export class QuickAddModal extends Modal {
 		this.contentEl.empty();
 		this.input = null;
 		this.submitting = false;
+		this.options.onClose?.();
 	}
 
 	private async submit(submitBtn: HTMLButtonElement): Promise<void> {
 		if (this.submitting) return;
 
 		const title = this.input?.getValue().trim() ?? '';
+
 		if (!title) {
 			this.input?.inputEl.focus();
 			return;

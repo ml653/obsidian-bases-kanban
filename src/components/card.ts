@@ -20,6 +20,8 @@ export interface CardCallbacks {
 	onHoverPreview: (linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement) => void;
 	onSetActiveCard: (path: string | null) => void;
 	onOpenInBackgroundTab: (file: TFile) => void;
+	onFocusCard: (path: string) => void;
+	onRenameCard: (file: TFile, newName: string) => Promise<void>;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -92,6 +94,8 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 	cardEl.className = CSS_CLASSES.CARD;
 	const filePath = entry.file.path;
 	cardEl.setAttribute(DATA_ATTRIBUTES.ENTRY_PATH, filePath);
+	cardEl.setAttribute('tabindex', '0');
+	cardEl.addEventListener('focus', () => cb.onFocusCard(filePath));
 
 	if (ctx.imagePropertyId) {
 		const coverEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_COVER });
@@ -105,6 +109,69 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 
 	const titleEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_TITLE });
 	renderCardTitle(titleEl, entry, ctx);
+
+	// Pencil button — opens the note (click on card body does inline edit)
+	const editBtn = cardEl.createDiv({ cls: CSS_CLASSES.CARD_EDIT_BTN });
+	editBtn.setAttribute('aria-label', 'Open note');
+	editBtn.setAttribute('role', 'button');
+	editBtn.setAttribute('tabindex', '-1');
+	editBtn.textContent = '✎';
+
+	editBtn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		e.preventDefault();
+		if (!ctx.app?.workspace) return;
+		void ctx.app.workspace.openLinkText(filePath, '', false);
+	});
+	editBtn.addEventListener('mousedown', (e) => e.preventDefault());
+
+	let isEditing = false;
+
+	const startEditing = (e: Event) => {
+		if (isEditing) return;
+		e.stopPropagation();
+		e.preventDefault();
+		isEditing = true;
+
+		const currentTitle = titleEl.textContent ?? entry.file.basename;
+		cardEl.classList.add(CSS_CLASSES.CARD_EDITING);
+
+		const input = cardEl.doc.createElement('input');
+		input.type = 'text';
+		input.className = CSS_CLASSES.CARD_TITLE_INPUT;
+		input.value = currentTitle;
+		titleEl.insertAdjacentElement('afterend', input);
+		input.focus();
+		input.select();
+
+		const finish = () => {
+			if (!isEditing) return;
+			isEditing = false;
+			input.remove();
+			cardEl.classList.remove(CSS_CLASSES.CARD_EDITING);
+			cardEl.focus({ preventScroll: true });
+		};
+
+		const commit = async () => {
+			const newName = input.value.trim();
+			finish();
+			if (newName && newName !== entry.file.basename) {
+				await cb.onRenameCard(entry.file, newName);
+			}
+		};
+
+		input.addEventListener('keydown', (ke) => {
+			if (ke.key === 'Enter') {
+				ke.preventDefault();
+				void commit();
+			} else if (ke.key === 'Escape') {
+				ke.preventDefault();
+				finish();
+			}
+			ke.stopPropagation();
+		});
+		input.addEventListener('blur', () => void commit());
+	};
 
 	for (const propertyId of ctx.order) {
 		if (propertyId === ctx.groupByPropertyId) continue;
@@ -135,14 +202,23 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 
 	const clickHandler = (e: MouseEvent) => {
 		if (e.target instanceof Element && e.target.closest('a')) return;
+		if (e.target instanceof Element && e.target.closest(`.${CSS_CLASSES.CARD_EDIT_BTN}`)) return;
+		if (e.target instanceof Element && e.target.closest(`.${CSS_CLASSES.CARD_TITLE_INPUT}`)) return;
 		if (e.type === 'auxclick' && e.button !== 1) return;
 		cb.onSetActiveCard(filePath);
 		if (!ctx.app?.workspace) return;
+		// Middle-click → open in background tab
 		if (e.button === 1) {
 			cb.onOpenInBackgroundTab(entry.file);
 			return;
 		}
-		void ctx.app.workspace.openLinkText(filePath, '', Keymap.isModEvent(e));
+		// Cmd/Ctrl+click → open note in new tab
+		if (Keymap.isModEvent(e)) {
+			void ctx.app.workspace.openLinkText(filePath, '', true);
+			return;
+		}
+		// Regular left-click → inline title edit
+		startEditing(e);
 	};
 	cardEl.addEventListener('click', clickHandler);
 	cardEl.addEventListener('auxclick', clickHandler);

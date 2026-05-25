@@ -1117,7 +1117,29 @@ export class KanbanView extends BasesView {
 	private _buildQuickAddCallbacks(): QuickAddCallbacks {
 		return {
 			createFileForView: (path, setFm) => this.createFileForView(path, setFm),
+			moveFileToFolder: (baseFileName, targetFolder) => this._moveCreatedFileToFolder(baseFileName, targetFolder),
 		};
+	}
+
+	private async _moveCreatedFileToFolder(baseFileName: string, targetFolder: string): Promise<void> {
+		if (!this.app?.vault || !this.app?.fileManager) return;
+
+		const folder = this.app.vault.getFolderByPath(targetFolder);
+		if (!folder) {
+			new Notice(`Quick add folder not found: ${targetFolder}`);
+			return;
+		}
+
+		// Find the file that was just created by createFileForView.
+		// It will be a markdown file whose basename matches baseFileName.
+		const created = this.app.vault.getMarkdownFiles().find((f) => f.basename === baseFileName);
+		if (!created) return;
+
+		// Only move if it's not already in the target folder.
+		if (created.parent?.path === targetFolder) return;
+
+		const destPath = normalizePath(`${targetFolder}/${created.name}`);
+		await this.app.fileManager.renameFile(created, destPath);
 	}
 
 	private createAddButton(columnValue: string, swimlaneValue: string | null): HTMLElement {

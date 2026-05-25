@@ -364,15 +364,24 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('quickAddFolder', 'cards');
 
+		// Simulate the file that createFileForView creates so moveFileToFolder can find it
+		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
+		(app.vault as any).getMarkdownFiles = () => [createdFile];
+
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
 		await (view as any).createQuickAddCard('New Task', 'Doing', null);
 
+		// createFileForView is called with just the base filename, not the full path
 		assert.deepStrictEqual((view as any).createFileForViewCalls, [
-			{ baseFileName: 'cards/New Task', frontmatter: { status: 'Doing' } },
+			{ baseFileName: 'New Task', frontmatter: { status: 'Doing' } },
 		]);
+		// The file is then renamed into the target folder
+		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
+		assert.strictEqual(app.fileManager.renameFile.calls[0][0], createdFile);
+		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Task.md');
 	});
 
 	test('quick add omits the column property for Uncategorized', async () => {
@@ -382,13 +391,18 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('quickAddFolder', 'cards');
 
+		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
+		(app.vault as any).getMarkdownFiles = () => [createdFile];
+
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
 		await (view as any).createQuickAddCard('New Task', UNCATEGORIZED_LABEL, null);
 
-		assert.deepStrictEqual((view as any).createFileForViewCalls, [{ baseFileName: 'cards/New Task', frontmatter: {} }]);
+		assert.deepStrictEqual((view as any).createFileForViewCalls, [{ baseFileName: 'New Task', frontmatter: {} }]);
+		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
+		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Task.md');
 	});
 
 	test('quick add sets both column and swimlane properties when used inside a lane', async () => {
@@ -402,6 +416,9 @@ describe('Data Rendering - Column Rendering', () => {
 		};
 		controller.config.set('quickAddFolder', 'cards');
 
+		const createdFile = createMockTFile('New Lane Task.md', 'New Lane Task', { path: '', name: '' });
+		(app.vault as any).getMarkdownFiles = () => [createdFile];
+
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
@@ -410,10 +427,12 @@ describe('Data Rendering - Column Rendering', () => {
 
 		assert.deepStrictEqual((view as any).createFileForViewCalls, [
 			{
-				baseFileName: 'cards/New Lane Task',
+				baseFileName: 'New Lane Task',
 				frontmatter: { status: 'Doing', priority: 'High' },
 			},
 		]);
+		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
+		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Lane Task.md');
 	});
 
 	test('quick add creates file directly in the configured folder', async () => {
@@ -426,6 +445,10 @@ describe('Data Rendering - Column Rendering', () => {
 
 		(app.vault as any).getFolderByPath = (path: string) => (path === 'energy' ? { path, name: 'energy' } : null);
 
+		// File is created in the target folder already — no rename needed
+		const createdFile = createMockTFile('energy/New Task.md', 'New Task', { path: 'energy', name: 'energy' });
+		(app.vault as any).getMarkdownFiles = () => [createdFile];
+
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
@@ -433,8 +456,9 @@ describe('Data Rendering - Column Rendering', () => {
 		await (view as any).createQuickAddCard('New Task', 'Doing', null);
 
 		assert.deepStrictEqual((view as any).createFileForViewCalls, [
-			{ baseFileName: 'energy/New Task', frontmatter: { status: 'Doing' } },
+			{ baseFileName: 'New Task', frontmatter: { status: 'Doing' } },
 		]);
+		// File is already in the target folder — renameFile should not be called
 		assert.deepStrictEqual(app.fileManager.renameFile.calls, []);
 	});
 

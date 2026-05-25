@@ -1,5 +1,5 @@
 import type { App, BasesPropertyId } from 'obsidian';
-import { Notice, normalizePath, parsePropertyId, setIcon } from 'obsidian';
+import { Notice, parsePropertyId, setIcon } from 'obsidian';
 import { QuickAddModal } from '../quickAddModal.ts';
 import { CSS_CLASSES, UNCATEGORIZED_LABEL } from '../constants.ts';
 
@@ -13,6 +13,7 @@ export interface QuickAddCtx {
 
 export interface QuickAddCallbacks {
 	createFileForView: (path: string, setFrontmatter: (fm: Record<string, unknown>) => void) => Promise<void>;
+	moveFileToFolder: (baseFileName: string, targetFolder: string) => Promise<void>;
 }
 
 function sanitizeBaseFileName(title: string): string {
@@ -85,8 +86,6 @@ export async function createQuickAddCard(
 		return;
 	}
 
-	const fileNameToCreate = normalizePath(`${targetFolder}/${baseFileName}`);
-
 	const setFrontmatter = (frontmatter: Record<string, unknown>): void => {
 		if (columnValue === UNCATEGORIZED_LABEL) {
 			delete frontmatter[columnPropertyName];
@@ -103,7 +102,8 @@ export async function createQuickAddCard(
 	};
 
 	try {
-		await cb.createFileForView(fileNameToCreate, setFrontmatter);
+		await cb.createFileForView(baseFileName, setFrontmatter);
+		await cb.moveFileToFolder(baseFileName, targetFolder);
 		closeNativeNewItemPopover(ctx.doc);
 	} catch (error) {
 		console.error('Error creating kanban card:', error);

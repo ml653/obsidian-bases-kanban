@@ -379,7 +379,6 @@
 	border-radius: 12px;
 }
 
-.obk-column-add-btn,
 .obk-column-remove-btn {
 	width: 24px;
 	height: 24px;
@@ -387,38 +386,19 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	font-size: 18px;
+	line-height: 1;
 	color: var(--text-muted);
 	cursor: pointer;
 	flex-shrink: 0;
 	transition:
 		background 0.1s ease,
-		color 0.1s ease,
-		opacity 0.1s ease;
+		color 0.1s ease;
 }
 
-.obk-column-add-btn {
-	opacity: 0.55;
-}
-
-.obk-column:hover .obk-column-add-btn,
-.obk-column-add-btn:focus-visible {
-	opacity: 1;
-}
-
-.obk-column-add-btn:hover,
 .obk-column-remove-btn:hover {
 	color: var(--text-normal);
 	background: var(--background-modifier-hover);
-}
-
-.obk-column-add-btn .svg-icon {
-	width: 16px;
-	height: 16px;
-}
-
-.obk-column-remove-btn {
-	font-size: 18px;
-	line-height: 1;
 }
 
 .obk-column-body {
@@ -487,12 +467,12 @@
 	top: 50%;
 	right: 8px;
 	transform: translateY(-50%);
-	width: 26px;
-	height: 26px;
+	width: 38px;
+	height: 38px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	font-size: 17px;
+	font-size: 26px;
 	color: var(--text-muted);
 	border-radius: 4px;
 	cursor: pointer;
@@ -675,4 +655,92 @@
 	background: var(--interactive-accent);
 	border: 2px dashed var(--interactive-accent);
 	border-radius: 6px;
+}
+
+/* Column hamburger menu button */
+.obk-column-menu-btn {
+	width: 24px;
+	height: 24px;
+	border-radius: 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 16px;
+	color: var(--text-muted);
+	cursor: pointer;
+	flex-shrink: 0;
+	opacity: 0.55;
+	position: relative;
+	transition:
+		background 0.1s ease,
+		color 0.1s ease,
+		opacity 0.1s ease;
+}
+
+.obk-column:hover .obk-column-menu-btn,
+.obk-column-menu-btn:focus-visible {
+	opacity: 1;
+}
+
+.obk-column-menu-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* Hidden column — collapse to a narrow vertical strip showing only title + unhide button */
+.obk-column--hidden {
+	flex: 0 0 40px;
+	min-height: 120px;
+	width: 40px;
+	min-width: 40px;
+	max-width: 40px;
+}
+
+.obk-column--hidden .obk-column-header {
+	flex-direction: column;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 6px;
+	padding: 6px 4px 4px;
+	height: 100%;
+	border-bottom: none;
+}
+
+.obk-column--hidden .obk-column-drag-handle,
+.obk-column--hidden .obk-column-color-btn {
+	display: none;
+}
+
+.obk-column--hidden .obk-column-title {
+	writing-mode: vertical-rl;
+	text-orientation: mixed;
+	transform: rotate(180deg);
+	font-size: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex-shrink: 0;
+	max-height: 100px;
+	white-space: nowrap;
+}
+
+/* Unhide button — shown only on hidden columns */
+.obk-column-unhide-btn {
+	width: 24px;
+	height: 24px;
+	border-radius: 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 14px;
+	color: var(--text-muted);
+	cursor: pointer;
+	flex-shrink: 0;
+	transition:
+		background 0.1s ease,
+		color 0.1s ease;
+}
+
+.obk-column-unhide-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
 }

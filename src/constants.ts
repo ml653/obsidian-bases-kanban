@@ -5,6 +5,13 @@
 /** Label used for entries without a property value */
 export const UNCATEGORIZED_LABEL = 'Uncategorized';
 
+/**
+ * Frontmatter property used to store the human-readable card title.
+ * Files are named with a datetime stamp; this property holds the original title.
+ * It is suppressed from the property list on cards (shown as the title instead).
+ */
+export const FILENAME_PROPERTY = 'note.filename' as const satisfies `note.${string}`;
+
 /** Source id registered with Obsidian's Page Preview core plugin */
 export const HOVER_LINK_SOURCE_ID = 'kanban-bases-view';
 
@@ -36,6 +43,7 @@ export const DATA_ATTRIBUTES = {
 	COLUMN_POSITION: 'data-column-position',
 	COLUMN_COLOR: 'data-column-color',
 	SWIMLANE_VALUE: 'data-swimlane-value',
+	COLUMN_HIDDEN: 'data-column-hidden',
 } as const;
 
 /**
@@ -78,8 +86,6 @@ export const CSS_CLASSES = {
 	COLUMN_DRAG_HANDLE: 'obk-column-drag-handle',
 	COLUMN_DRAGGING: 'obk-column-dragging',
 	COLUMN_GHOST: 'obk-column-ghost',
-	COLUMN_ADD_BTN: 'obk-column-add-btn',
-
 	// Card
 	CARD: 'obk-card',
 	CARD_TITLE: 'obk-card-title',
@@ -108,6 +114,11 @@ export const CSS_CLASSES = {
 
 	// Column remove button (shown only when column is empty)
 	COLUMN_REMOVE_BTN: 'obk-column-remove-btn',
+
+	// Column hide/unhide controls
+	COLUMN_MENU_BTN: 'obk-column-menu-btn',
+	COLUMN_HIDDEN: 'obk-column--hidden',
+	COLUMN_UNHIDE_BTN: 'obk-column-unhide-btn',
 
 	// Quick add modal
 	QUICK_ADD_FORM: 'obk-quick-add-form',

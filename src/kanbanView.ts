@@ -7,7 +7,6 @@ import {
 	type CardCallbacks,
 } from './components/card.ts';
 import {
-	createAddButton as createAddButtonEl,
 	createQuickAddCard as createQuickAddCardEl,
 	closeNativeNewItemPopover as closeNativeNewItemPopoverEl,
 	type QuickAddCtx,
@@ -125,7 +124,7 @@ export class KanbanView extends BasesView {
 	private _lastImageFit: string | undefined = undefined;
 	private _lastImageAspectRatio: number | undefined = undefined;
 	private _lastSwimlanePropertyId: BasesPropertyId | null | undefined = undefined;
-	private _lastQuickAddFolder: string | null | undefined = undefined;
+
 	private _cardFingerprints: Map<string, string> = new Map();
 	private _deferredSortableListeners: Map<string, { el: HTMLElement; handler: () => void }> = new Map();
 
@@ -135,12 +134,14 @@ export class KanbanView extends BasesView {
 		cardOrders: Record<string, string[]>;
 		columnColors: Record<string, string>;
 		collapsedLanes: Set<string>;
+		hiddenColumns: Set<string>;
 	} = {
 		columnOrder: [],
 		swimlaneOrder: [],
 		cardOrders: {},
 		columnColors: {}, // columnValue → colorName
 		collapsedLanes: new Set(),
+		hiddenColumns: new Set(),
 	};
 	private _prefsPropertyId: BasesPropertyId | null = null;
 	private _prefsSwimlanePropertyId: BasesPropertyId | null = null;
@@ -153,6 +154,8 @@ export class KanbanView extends BasesView {
 	private _dragging = false;
 	private _activeCardPath: string | null = null;
 	private _keyboardFocusPath: string | null = null;
+	/** Path of a newly-created card that needs focus. Immune to onFocusCard overwrites. */
+	private _pendingCreatedFocusPath: string | null = null;
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, legacyData: LegacyData | null = null) {
 		super(controller);
@@ -308,6 +311,11 @@ export class KanbanView extends BasesView {
 		const allSwimlaneOrders = isColumnOrders(rawSwimlaneOrders) ? rawSwimlaneOrders : {};
 		this._prefs.swimlaneOrder =
 			swimlaneScopedKey && allSwimlaneOrders[swimlaneScopedKey] ? [...allSwimlaneOrders[swimlaneScopedKey]] : [];
+
+		// Hidden columns — scoped by groupByPropertyId.
+		const rawHidden = this.config?.get('hiddenColumns');
+		const allHidden = isColumnOrders(rawHidden) ? rawHidden : {};
+		this._prefs.hiddenColumns = new Set(allHidden[propertyId] ?? []);
 	}
 
 	/**
@@ -345,6 +353,7 @@ export class KanbanView extends BasesView {
 			swimlaneScopedKey ?? this._prefsPropertyId,
 		);
 		this._persistConfigKey('columnColors', isColumnColors, this._prefs.columnColors, this._prefsPropertyId);
+		this._persistConfigKey('hiddenColumns', isColumnOrders, Array.from(this._prefs.hiddenColumns), this._prefsPropertyId);
 
 		if (swimlaneScopedKey) {
 			this._persistConfigKey('swimlaneOrders', isColumnOrders, this._prefs.swimlaneOrder, swimlaneScopedKey);
@@ -490,10 +499,6 @@ export class KanbanView extends BasesView {
 			const swimlanePropertyChanged = currentSwimlanePropertyId !== this._lastSwimlanePropertyId;
 			this._lastSwimlanePropertyId = currentSwimlanePropertyId;
 
-			const currentQuickAddFolder = this.getQuickAddFolder();
-			const quickAddFolderChanged = currentQuickAddFolder !== this._lastQuickAddFolder;
-			this._lastQuickAddFolder = currentQuickAddFolder;
-
 			const existingBoard = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
 			const optionsChanged =
 				orderChanged ||
@@ -502,8 +507,7 @@ export class KanbanView extends BasesView {
 				imagePropertyChanged ||
 				imageFitChanged ||
 				imageAspectRatioChanged ||
-				swimlanePropertyChanged ||
-				quickAddFolderChanged;
+				swimlanePropertyChanged;
 
 			const lanes = new Map<string | null, Map<string, BasesEntry[]>>();
 			if (groupedByLane) {
@@ -862,7 +866,31 @@ export class KanbanView extends BasesView {
 		// Add new columns or patch existing
 		orderedColumnValues.forEach((colValue) => {
 			const entries = groupedEntries.get(colValue) ?? [];
-			if (!existingColumns.has(colValue)) {
+			const existingEl = existingColumns.get(colValue);
+
+			// Rebuild the column if its hidden state has changed — patchColumnCards
+			// cannot add/remove the card body or swap the header controls.
+			const shouldBeHidden = this._prefs.hiddenColumns.has(colValue);
+			const isCurrentlyHidden = existingEl?.classList.contains(CSS_CLASSES.COLUMN_HIDDEN) ?? false;
+			const hiddenStateChanged = existingEl !== undefined && shouldBeHidden !== isCurrentlyHidden;
+
+			if (!existingEl || hiddenStateChanged) {
+				if (existingEl && hiddenStateChanged) {
+					// Destroy any sortable on the old element before replacing.
+					const key = this.cardOrderKey(laneValue, colValue);
+					const s = this._columnSortables.get(key);
+					if (s) {
+						s.destroy();
+						this._columnSortables.delete(key);
+					}
+					const deferred = this._deferredSortableListeners.get(key);
+					if (deferred) {
+						deferred.el.removeEventListener('pointerdown', deferred.handler);
+						this._deferredSortableListeners.delete(key);
+					}
+					existingEl.remove();
+					existingColumns.delete(colValue);
+				}
 				const options = laneValue !== null ? { showRemoveButton: false as const, swimlaneValue: laneValue } : {};
 				const colEl = this.createColumn(colValue, entries, options);
 				containerEl.appendChild(colEl);
@@ -882,12 +910,9 @@ export class KanbanView extends BasesView {
 						el: cardBody,
 						handler: attachOnce,
 					});
-				} else {
-					console.warn('KanbanView: column body not found for new column; card drag will not work', colValue);
 				}
 			} else {
-				const colEl = existingColumns.get(colValue);
-				if (colEl) this.patchColumnCards(colEl, entries);
+				this.patchColumnCards(existingEl, entries);
 			}
 		});
 
@@ -1003,7 +1028,7 @@ export class KanbanView extends BasesView {
 			doc: this.containerEl.doc,
 			card: this._buildCardCtx(),
 			cardCb: this._buildCardCallbacks(),
-			prefs: { columnColors: this._prefs.columnColors },
+			prefs: { columnColors: this._prefs.columnColors, hiddenColumns: this._prefs.hiddenColumns },
 			dragging: this._dragging,
 			cardFingerprints: this._cardFingerprints,
 		};
@@ -1014,8 +1039,7 @@ export class KanbanView extends BasesView {
 			applyColumnColor: (el, name) => this.applyColumnColor(el, name),
 			onColorPickerClick: (anchor, col, val) => this.openColorPicker(anchor, col, val),
 			onRemoveColumn: (val, el) => this.removeColumn(val, el),
-			createAddButton: (colVal, laneVal) => this.createAddButton(colVal, laneVal),
-			getQuickAddFolder: () => this.getQuickAddFolder(),
+			onToggleColumnHidden: (val, hidden) => this.toggleColumnHidden(val, hidden),
 		};
 	}
 
@@ -1050,20 +1074,23 @@ export class KanbanView extends BasesView {
 			onFocusCard: (path) => {
 				this._keyboardFocusPath = path;
 			},
-			onRenameCard: (file, newName) => this.renameCard(file, newName),
+			onUpdateFilenameProperty: (file, newTitle) => this.updateFilenameProperty(file, newTitle),
 		};
 	}
 
-	private async renameCard(file: TFile, newName: string): Promise<void> {
+	/**
+	 * Update the `filename` frontmatter property with a new human-readable title.
+	 * The actual file name (datetime stamp) is left unchanged.
+	 */
+	private async updateFilenameProperty(file: TFile, newTitle: string): Promise<void> {
 		if (!this.app?.fileManager) return;
-		const sanitized = newName.replace(/[\\/:*?"<>|]/g, '-').trim();
-		if (!sanitized) return;
-		const newPath = normalizePath(`${file.parent?.path ?? ''}/${sanitized}.md`);
 		try {
-			await this.app.fileManager.renameFile(file, newPath);
+			await this.app.fileManager.processFrontMatter(file, (frontmatter: Record<string, unknown>) => {
+				frontmatter['filename'] = newTitle;
+			});
 		} catch (error) {
-			console.error('Error renaming card:', error);
-			new Notice('Could not rename card.');
+			console.error('Error updating filename property:', error);
+			new Notice('Could not update card title.');
 		}
 	}
 
@@ -1153,7 +1180,25 @@ export class KanbanView extends BasesView {
 			getMarkdownFilePaths: () => new Set(this.app?.vault.getMarkdownFiles().map((f) => f.path) ?? []),
 			moveFileToFolder: (prev, baseFileName, targetFolder) =>
 				this._moveCreatedFileToFolder(prev, baseFileName, targetFolder),
+			onCardCreated: (filePath, columnValue, swimlaneValue) => this._onCardCreated(filePath, columnValue, swimlaneValue),
 		};
+	}
+
+	/**
+	 * Called after a quick-add card has been created and placed in the vault.
+	 * Appends it to the bottom of the saved card order for its column so it
+	 * renders last, then polls until the card DOM element appears and focuses it.
+	 */
+	private _onCardCreated(filePath: string, columnValue: string, swimlaneValue: string | null): void {
+		if (this._prefsPropertyId) {
+			const key = this.cardOrderKey(swimlaneValue, columnValue);
+			const order = (this._prefs.cardOrders[key] ?? []).filter((p) => p !== filePath);
+			this._prefs.cardOrders[key] = [filePath, ...order];
+			this._persistPrefs();
+		}
+		// Use a dedicated field immune to onFocusCard overwrites so Obsidian's
+		// modal-close focus restoration can't steal the target.
+		this._pendingCreatedFocusPath = filePath;
 	}
 
 	/**
@@ -1166,20 +1211,21 @@ export class KanbanView extends BasesView {
 		previousPaths: Set<string>,
 		baseFileName: string,
 		targetFolder: string,
-	): Promise<void> {
-		if (!this.app?.vault || !this.app?.fileManager) return;
+	): Promise<string | null> {
+		if (!this.app?.vault || !this.app?.fileManager) return null;
 
 		const folder = this.app.vault.getFolderByPath(targetFolder);
 		if (!folder) {
 			new Notice(`Quick add folder not found: ${targetFolder}`);
-			return;
+			return null;
 		}
 
 		// createFileForView may resolve before the file is flushed to the vault
 		// index. Poll until the new file appears (up to ~2 s in 50 ms steps).
-		// We match by exact basename since we control the dated filename.
-		const findCreated = () =>
-			this.app?.vault.getMarkdownFiles().find((f) => !previousPaths.has(f.path) && f.basename === baseFileName) ?? null;
+		// Match by path diff (any new path not in the pre-snapshot) to avoid
+		// relying on basename, which breaks when the filename contains multiple
+		// dots (Obsidian treats everything after the first dot as the extension).
+		const findCreated = () => this.app?.vault.getMarkdownFiles().find((f) => !previousPaths.has(f.path)) ?? null;
 
 		let created = findCreated();
 		if (!created) {
@@ -1199,17 +1245,14 @@ export class KanbanView extends BasesView {
 			});
 		}
 
-		if (!created) return;
+		if (!created) return null;
 
-		// Already in the right place — nothing to do.
-		if (created.parent?.path === targetFolder) return;
+		// Already in the right place — move not needed, return current path.
+		if (created.parent?.path === targetFolder) return created.path;
 
 		const destPath = normalizePath(`${targetFolder}/${created.name}`);
 		await this.app.fileManager.renameFile(created, destPath);
-	}
-
-	private createAddButton(columnValue: string, swimlaneValue: string | null): HTMLElement {
-		return createAddButtonEl(columnValue, swimlaneValue, this._buildQuickAddCtx(), this._buildQuickAddCallbacks());
+		return destPath;
 	}
 
 	private async createQuickAddCard(title: string, columnValue: string, swimlaneValue: string | null): Promise<void> {
@@ -1240,6 +1283,17 @@ export class KanbanView extends BasesView {
 		this._prefs.columnOrder = this._prefs.columnOrder.filter((v) => v !== value);
 		this._persistPrefs();
 		this.detachColumn(value, columnEl);
+	}
+
+	private toggleColumnHidden(value: string, hidden: boolean): void {
+		if (hidden) {
+			this._prefs.hiddenColumns.add(value);
+		} else {
+			this._prefs.hiddenColumns.delete(value);
+		}
+		this._persistPrefs();
+		// Rebuild so unhidden columns get their card body populated.
+		this.render();
 	}
 
 	private attachCardSortable(body: HTMLElement, value: string): void {
@@ -1410,6 +1464,12 @@ export class KanbanView extends BasesView {
 		// Preserve focus on this card after the re-render triggered by the write.
 		this._keyboardFocusPath = entryPath;
 
+		// Prepend to the destination column order so it lands at the top.
+		const newKey = this.cardOrderKey(null, newColumnValue);
+		const existingDestOrder = (this._prefs.cardOrders[newKey] ?? []).filter((p) => p !== entryPath);
+		this._prefs.cardOrders[newKey] = [entryPath, ...existingDestOrder];
+		this._persistPrefs();
+
 		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
 		const columnValueToSet = newColumnValue === UNCATEGORIZED_LABEL ? '' : newColumnValue;
 
@@ -1508,13 +1568,6 @@ export class KanbanView extends BasesView {
 			columnValue,
 			swimlaneValue,
 			onSubmit: (title) => createQuickAddCardEl(title, columnValue, swimlaneValue, ctx, cb),
-			onClose: () => {
-				// Restore focus to the board so Ctrl+A can fire again immediately.
-				const focusTarget =
-					(this._keyboardFocusPath && this.findCardEl(this._keyboardFocusPath)) ??
-					this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.CARD}`);
-				focusTarget?.focus({ preventScroll: true });
-			},
 		}).open();
 	}
 
@@ -1591,13 +1644,35 @@ export class KanbanView extends BasesView {
 		if (this._activeCardPath) {
 			this.findCardEl(this._activeCardPath)?.classList.add(CSS_CLASSES.CARD_ACTIVE);
 		}
-		if (this._keyboardFocusPath) {
-			const cardEl = this.findCardEl(this._keyboardFocusPath);
+
+		// Pending creation focus takes priority — it must survive modal close
+		// focus restoration and multiple render cycles until the card appears.
+		if (this._pendingCreatedFocusPath) {
+			const path = this._pendingCreatedFocusPath;
+			const cardEl = this.findCardEl(path);
 			if (cardEl) {
-				window.requestAnimationFrame(() => cardEl.focus({ preventScroll: true }));
-			} else {
-				// Card no longer exists (e.g. moved to a different view) — clear.
-				this._keyboardFocusPath = null;
+				window.requestAnimationFrame(() => {
+					cardEl.focus({ preventScroll: false });
+					cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+					if (this._pendingCreatedFocusPath === path) {
+						this._pendingCreatedFocusPath = null;
+					}
+				});
+			}
+			// Don't clear if not found yet — next render will retry.
+			return;
+		}
+
+		if (this._keyboardFocusPath) {
+			const path = this._keyboardFocusPath;
+			const cardEl = this.findCardEl(path);
+			if (cardEl) {
+				window.requestAnimationFrame(() => {
+					cardEl.focus({ preventScroll: false });
+					if (this._keyboardFocusPath === path) {
+						this._keyboardFocusPath = null;
+					}
+				});
 			}
 		}
 	}

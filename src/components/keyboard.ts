@@ -55,8 +55,9 @@ export function navigateVertical(cardEl: HTMLElement, direction: 'up' | 'down'):
 }
 
 /**
- * Move keyboard focus to the same-index card in the adjacent column.
- * Falls back to the last card if the adjacent column has fewer cards.
+ * Move keyboard focus to the same-index card in the nearest non-empty column
+ * in the given direction, skipping over empty columns.
+ * Falls back to the last card if the target column has fewer cards.
  * Returns true if handled.
  */
 export function navigateHorizontal(cardEl: HTMLElement, boardEl: HTMLElement, direction: 'left' | 'right'): boolean {
@@ -67,12 +68,20 @@ export function navigateHorizontal(cardEl: HTMLElement, boardEl: HTMLElement, di
 	const colIdx = columns.indexOf(columnEl);
 	if (colIdx === -1) return false;
 
-	const targetColumn = columns[direction === 'left' ? colIdx - 1 : colIdx + 1];
+	const step = direction === 'left' ? -1 : 1;
+	let targetColumn: HTMLElement | null = null;
+	let i = colIdx + step;
+	while (i >= 0 && i < columns.length) {
+		const cards = getColumnCards(columns[i]);
+		if (cards.length > 0) {
+			targetColumn = columns[i];
+			break;
+		}
+		i += step;
+	}
 	if (!targetColumn) return false;
 
 	const targetCards = getColumnCards(targetColumn);
-	if (targetCards.length === 0) return false;
-
 	const currentIdx = getColumnCards(columnEl).indexOf(cardEl);
 	focusCard(targetCards[Math.min(currentIdx, targetCards.length - 1)]);
 	return true;
@@ -190,14 +199,23 @@ export function deleteCard(cardEl: HTMLElement, cb: KeyboardMoveCallbacks): bool
  */
 export function handleBoardKeydown(e: KeyboardEvent, boardEl: HTMLElement, cb: KeyboardMoveCallbacks): void {
 	const isMod = e.metaKey || e.ctrlKey;
-
 	// Resolve the event target — must be an Element to support `.closest`.
 	if (!(e.target instanceof Element)) return;
 	const target = e.target;
 	const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
 
-	// Enter — open focused card in a popout window (not while editing).
+	// Enter — start inline title edit on the focused card (not while already editing).
 	if (e.key === 'Enter' && !isInput && !isMod) {
+		const cardEl = target.closest<HTMLElement>(`.${CSS_CLASSES.CARD}`);
+		if (cardEl) {
+			e.preventDefault();
+			cardEl.dispatchEvent(new Event('obk:start-edit'));
+		}
+		return;
+	}
+
+	// Ctrl/Cmd+e — open focused card in a new tab.
+	if (e.key === 'e' && isMod) {
 		const cardEl = target.closest<HTMLElement>(`.${CSS_CLASSES.CARD}`);
 		if (cardEl) {
 			const entryPath = cardEl.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH);

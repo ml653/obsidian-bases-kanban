@@ -268,95 +268,6 @@ describe('Data Rendering - Column Rendering', () => {
 		assert.ok(body?.getAttribute('data-sortable-container'), 'Column body should have data-sortable-container attribute');
 	});
 
-	test('column quick add button has an accessible label and plus icon', () => {
-		const entries = createEntriesWithStatus();
-		controller = createMockQueryController(entries, TEST_PROPERTIES);
-		controller.app = app;
-		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
-		controller.config.set('quickAddFolder', 'cards');
-
-		const view = new KanbanView(controller, scrollEl);
-		setupKanbanViewWithApp(view, app);
-		triggerDataUpdate(view);
-
-		const doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		const addBtn = doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`);
-		assert.ok(addBtn, 'Doing column should have a quick add button');
-		assert.strictEqual(addBtn?.getAttribute('aria-label'), 'Add card to column: Doing');
-		assert.strictEqual(addBtn?.getAttribute('tabindex'), '-1');
-		assert.ok(addBtn?.querySelector('[data-icon="plus"]'), 'Quick add button should render the plus icon');
-	});
-
-	test('column quick add button does not exist when no folder is configured', () => {
-		const entries = createEntriesWithStatus();
-		controller = createMockQueryController(entries, TEST_PROPERTIES);
-		controller.app = app;
-		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
-
-		const view = new KanbanView(controller, scrollEl);
-		setupKanbanViewWithApp(view, app);
-		triggerDataUpdate(view);
-
-		const doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		const addBtn = doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`);
-		assert.strictEqual(addBtn, null, 'Column should not have a quick add button without folder configured');
-	});
-
-	test('quick add button appears after full rebuild when folder is configured', () => {
-		const entries = createEntriesWithStatus();
-		controller = createMockQueryController(entries, TEST_PROPERTIES);
-		controller.app = app;
-		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
-
-		const view = new KanbanView(controller, scrollEl);
-		setupKanbanViewWithApp(view, app);
-		triggerDataUpdate(view);
-
-		// No button yet
-		let doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		assert.strictEqual(doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`), null);
-
-		// Configure folder and re-render — folder change triggers a full rebuild
-		controller.config.set('quickAddFolder', 'cards');
-		triggerDataUpdate(view);
-
-		doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		assert.ok(
-			doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`),
-			'Add button should appear after folder is configured',
-		);
-	});
-
-	test('quick add button is removed after full rebuild when folder is cleared', () => {
-		const entries = createEntriesWithStatus();
-		controller = createMockQueryController(entries, TEST_PROPERTIES);
-		controller.app = app;
-		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
-		controller.config.set('quickAddFolder', 'cards');
-
-		const view = new KanbanView(controller, scrollEl);
-		setupKanbanViewWithApp(view, app);
-		triggerDataUpdate(view);
-
-		// Button present
-		let doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		assert.ok(
-			doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`),
-			'Add button should be present when folder is configured',
-		);
-
-		// Clear folder and re-render — folder change triggers a full rebuild
-		controller.config.set('quickAddFolder', null);
-		triggerDataUpdate(view);
-
-		doingColumn = view.containerEl.querySelector('[data-column-value="Doing"]');
-		assert.strictEqual(
-			doingColumn?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`),
-			null,
-			'Add button should be removed after folder is cleared',
-		);
-	});
-
 	test('quick add creates a file with the selected column property', async () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
@@ -364,25 +275,36 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('quickAddFolder', 'cards');
 
-		// Before createFileForView: vault is empty. After: file appears.
-		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
-		let callCount = 0;
-		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
-
+		// Before createFileForView: vault is empty. After: file appears (basename matches timestamp pattern).
+		let stampUsed = '';
+		const origCreate = (view: any) => {
+			const orig = view.createFileForView.bind(view);
+			view.createFileForView = async (name: string, fm: any) => {
+				stampUsed = name;
+				return orig(name, fm);
+			};
+		};
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
+		origCreate(view);
 		triggerDataUpdate(view);
+
+		// Simulate the vault returning a new file whose basename matches the stamp.
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => {
+			if (callCount++ === 0) return [];
+			return [createMockTFile(`cards/${stampUsed}.md`, stampUsed, { path: 'cards', name: 'cards' })];
+		};
 
 		await (view as any).createQuickAddCard('New Task', 'Doing', null);
 
-		// createFileForView is called with just the base filename, not the full path
-		assert.deepStrictEqual((view as any).createFileForViewCalls, [
-			{ baseFileName: 'New Task', frontmatter: { status: 'Doing' } },
-		]);
-		// The file is then renamed into the target folder
-		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
-		assert.strictEqual(app.fileManager.renameFile.calls[0][0], createdFile);
-		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Task.md');
+		// createFileForView is called with a datetime stamp filename (YYYY-MM-DD.HH.MM.xxxx pattern)
+		assert.strictEqual((view as any).createFileForViewCalls.length, 1);
+		const call = (view as any).createFileForViewCalls[0];
+		assert.match(call.baseFileName, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_[a-z]{4}$/);
+		assert.deepStrictEqual(call.frontmatter, { filename: 'New Task', status: 'Doing' });
+		// File is placed directly in the cards folder — renameFile should not be called
+		assert.deepStrictEqual(app.fileManager.renameFile.calls, []);
 	});
 
 	test('quick add omits the column property for Uncategorized', async () => {
@@ -392,19 +314,30 @@ describe('Data Rendering - Column Rendering', () => {
 		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
 		controller.config.set('quickAddFolder', 'cards');
 
-		const createdFile = createMockTFile('New Task.md', 'New Task', { path: '', name: '' });
-		let callCount = 0;
-		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
-
+		let stampUsed = '';
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
+		const origCreate = view.createFileForView.bind(view);
+		(view as any).createFileForView = async (name: string, fm: any) => {
+			stampUsed = name;
+			return origCreate(name, fm);
+		};
 		triggerDataUpdate(view);
+
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => {
+			if (callCount++ === 0) return [];
+			return [createMockTFile(`cards/${stampUsed}.md`, stampUsed, { path: 'cards', name: 'cards' })];
+		};
 
 		await (view as any).createQuickAddCard('New Task', UNCATEGORIZED_LABEL, null);
 
-		assert.deepStrictEqual((view as any).createFileForViewCalls, [{ baseFileName: 'New Task', frontmatter: {} }]);
-		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
-		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Task.md');
+		assert.strictEqual((view as any).createFileForViewCalls.length, 1);
+		const call = (view as any).createFileForViewCalls[0];
+		assert.match(call.baseFileName, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_[a-z]{4}$/);
+		// Uncategorized: no status property, but filename is still set
+		assert.deepStrictEqual(call.frontmatter, { filename: 'New Task' });
+		assert.deepStrictEqual(app.fileManager.renameFile.calls, []);
 	});
 
 	test('quick add sets both column and swimlane properties when used inside a lane', async () => {
@@ -418,24 +351,29 @@ describe('Data Rendering - Column Rendering', () => {
 		};
 		controller.config.set('quickAddFolder', 'cards');
 
-		const createdFile = createMockTFile('New Lane Task.md', 'New Lane Task', { path: '', name: '' });
-		let callCount = 0;
-		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
-
+		let stampUsed = '';
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
+		const origCreate = view.createFileForView.bind(view);
+		(view as any).createFileForView = async (name: string, fm: any) => {
+			stampUsed = name;
+			return origCreate(name, fm);
+		};
 		triggerDataUpdate(view);
+
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => {
+			if (callCount++ === 0) return [];
+			return [createMockTFile(`cards/${stampUsed}.md`, stampUsed, { path: 'cards', name: 'cards' })];
+		};
 
 		await (view as any).createQuickAddCard('New Lane Task', 'Doing', 'High');
 
-		assert.deepStrictEqual((view as any).createFileForViewCalls, [
-			{
-				baseFileName: 'New Lane Task',
-				frontmatter: { status: 'Doing', priority: 'High' },
-			},
-		]);
-		assert.strictEqual(app.fileManager.renameFile.calls.length, 1);
-		assert.strictEqual(app.fileManager.renameFile.calls[0][1], 'cards/New Lane Task.md');
+		assert.strictEqual((view as any).createFileForViewCalls.length, 1);
+		const call = (view as any).createFileForViewCalls[0];
+		assert.match(call.baseFileName, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_[a-z]{4}$/);
+		assert.deepStrictEqual(call.frontmatter, { filename: 'New Lane Task', status: 'Doing', priority: 'High' });
+		assert.deepStrictEqual(app.fileManager.renameFile.calls, []);
 	});
 
 	test('quick add creates file directly in the configured folder', async () => {
@@ -448,20 +386,29 @@ describe('Data Rendering - Column Rendering', () => {
 
 		(app.vault as any).getFolderByPath = (path: string) => (path === 'energy' ? { path, name: 'energy' } : null);
 
-		// File is created in the target folder already — no rename needed
-		const createdFile = createMockTFile('energy/New Task.md', 'New Task', { path: 'energy', name: 'energy' });
-		let callCount = 0;
-		(app.vault as any).getMarkdownFiles = () => (callCount++ === 0 ? [] : [createdFile]);
-
+		let stampUsed = '';
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
+		const origCreate = view.createFileForView.bind(view);
+		(view as any).createFileForView = async (name: string, fm: any) => {
+			stampUsed = name;
+			return origCreate(name, fm);
+		};
 		triggerDataUpdate(view);
+
+		// File is created directly in the target folder — no rename needed.
+		let callCount = 0;
+		(app.vault as any).getMarkdownFiles = () => {
+			if (callCount++ === 0) return [];
+			return [createMockTFile(`energy/${stampUsed}.md`, stampUsed, { path: 'energy', name: 'energy' })];
+		};
 
 		await (view as any).createQuickAddCard('New Task', 'Doing', null);
 
-		assert.deepStrictEqual((view as any).createFileForViewCalls, [
-			{ baseFileName: 'New Task', frontmatter: { status: 'Doing' } },
-		]);
+		assert.strictEqual((view as any).createFileForViewCalls.length, 1);
+		const call = (view as any).createFileForViewCalls[0];
+		assert.match(call.baseFileName, /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}_[a-z]{4}$/);
+		assert.deepStrictEqual(call.frontmatter, { filename: 'New Task', status: 'Doing' });
 		// File is already in the target folder — renameFile should not be called
 		assert.deepStrictEqual(app.fileManager.renameFile.calls, []);
 	});

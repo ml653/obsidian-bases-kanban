@@ -6,7 +6,7 @@ export interface ColumnRenderCtx {
 	doc: Document;
 	card: CardRenderCtx;
 	cardCb: CardCallbacks;
-	prefs: { columnColors: Record<string, string> };
+	prefs: { columnColors: Record<string, string>; hiddenColumns: Set<string> };
 	dragging: boolean;
 	cardFingerprints: Map<string, string>;
 }
@@ -15,8 +15,7 @@ export interface ColumnCallbacks {
 	applyColumnColor: (columnEl: HTMLElement, colorName: string | null) => void;
 	onColorPickerClick: (anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string) => void;
 	onRemoveColumn: (columnValue: string, columnEl: HTMLElement) => void;
-	createAddButton: (columnValue: string, swimlaneValue: string | null) => HTMLElement;
-	getQuickAddFolder: () => string | null;
+	onToggleColumnHidden: (columnValue: string, hidden: boolean) => void;
 }
 
 export function applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
@@ -33,6 +32,34 @@ export function applyColumnColor(columnEl: HTMLElement, colorName: string | null
 	}
 	columnEl.style.setProperty('--obk-column-accent-color', cssVar);
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_COLOR, colorName);
+}
+
+function createHideButton(doc: Document, value: string, cb: ColumnCallbacks): HTMLElement {
+	const btn = doc.createElement('div');
+	btn.className = CSS_CLASSES.COLUMN_MENU_BTN;
+	btn.setAttribute('aria-label', `Hide column: ${value}`);
+	btn.setAttribute('role', 'button');
+	btn.setAttribute('tabindex', '-1');
+	btn.textContent = '\u2212'; // − minus sign
+	btn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onToggleColumnHidden(value, true);
+	});
+	return btn;
+}
+
+function createUnhideButton(doc: Document, value: string, cb: ColumnCallbacks): HTMLElement {
+	const btn = doc.createElement('div');
+	btn.className = CSS_CLASSES.COLUMN_UNHIDE_BTN;
+	btn.setAttribute('aria-label', `Show column: ${value}`);
+	btn.setAttribute('role', 'button');
+	btn.setAttribute('tabindex', '-1');
+	btn.textContent = '+'; // + plus sign
+	btn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onToggleColumnHidden(value, false);
+	});
+	return btn;
 }
 
 export function createRemoveButton(doc: Document, value: string, onRemove: () => void): HTMLElement {
@@ -59,39 +86,48 @@ export function createColumn(
 	columnEl.className = CSS_CLASSES.COLUMN;
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_VALUE, value);
 
+	const isHidden = ctx.prefs.hiddenColumns.has(value);
+	if (isHidden) {
+		columnEl.classList.add(CSS_CLASSES.COLUMN_HIDDEN);
+		columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_HIDDEN, 'true');
+	}
+
 	const colorName = ctx.prefs.columnColors[value] ?? null;
 	cb.applyColumnColor(columnEl, colorName);
 
 	const headerEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_HEADER });
 
-	const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
-	dragHandle.textContent = '⋮⋮';
+	if (isHidden) {
+		headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
+		headerEl.appendChild(createUnhideButton(ctx.doc, value, cb));
+	} else {
+		const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
+		dragHandle.textContent = '⋮⋮';
 
-	const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
-	colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
-	colorBtn.setAttribute('role', 'button');
-	colorBtn.addEventListener('click', (e) => {
-		e.stopPropagation();
-		cb.onColorPickerClick(colorBtn, columnEl, value);
-	});
+		const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
+		colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
+		colorBtn.setAttribute('role', 'button');
+		colorBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			cb.onColorPickerClick(colorBtn, columnEl, value);
+		});
 
-	headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
-	headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
+		headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
+		headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
 
-	if (cb.getQuickAddFolder()) {
-		headerEl.appendChild(cb.createAddButton(value, options.swimlaneValue ?? null));
+		if (entries.length === 0 && options.showRemoveButton !== false) {
+			headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
+		}
+
+		headerEl.appendChild(createHideButton(ctx.doc, value, cb));
+
+		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
+		bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+
+		entries.forEach((entry) => {
+			bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
+		});
 	}
-
-	if (entries.length === 0 && options.showRemoveButton !== false) {
-		headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
-	}
-
-	const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
-	bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
-
-	entries.forEach((entry) => {
-		bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
-	});
 
 	return columnEl;
 }
@@ -113,19 +149,13 @@ export function patchColumnCards(
 	const existingRemoveBtn = headerEl?.querySelector(`.${CSS_CLASSES.COLUMN_REMOVE_BTN}`) ?? null;
 	const isInSwimlane = !!columnEl.closest(`.${CSS_CLASSES.SWIMLANE}`);
 	if (headerEl && newEntries.length === 0 && !existingRemoveBtn && columnValue && !isInSwimlane) {
-		headerEl.appendChild(createRemoveButton(ctx.doc, columnValue, () => cb.onRemoveColumn(columnValue, columnEl)));
+		// Insert remove button before the hide button
+		const hideBtn = headerEl.querySelector(`.${CSS_CLASSES.COLUMN_MENU_BTN}`);
+		const removeBtn = createRemoveButton(ctx.doc, columnValue, () => cb.onRemoveColumn(columnValue, columnEl));
+		if (hideBtn) headerEl.insertBefore(removeBtn, hideBtn);
+		else headerEl.appendChild(removeBtn);
 	} else if (newEntries.length > 0 && existingRemoveBtn) {
 		existingRemoveBtn.remove();
-	}
-
-	const existingAddBtn = headerEl?.querySelector(`.${CSS_CLASSES.COLUMN_ADD_BTN}`) ?? null;
-	const hasFolder = !!cb.getQuickAddFolder();
-	if (headerEl && columnValue && hasFolder && !existingAddBtn) {
-		const swimlaneEl = columnEl.closest<HTMLElement>(`[${DATA_ATTRIBUTES.SWIMLANE_VALUE}]`);
-		const swimlaneValue = swimlaneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) ?? null;
-		headerEl.appendChild(cb.createAddButton(columnValue, swimlaneValue));
-	} else if (!hasFolder && existingAddBtn) {
-		existingAddBtn.remove();
 	}
 
 	const newPaths = new Set(newEntries.map((e) => e.file.path));
@@ -154,9 +184,6 @@ export function patchColumnCards(
 		}
 	});
 
-	// Reorder cards in the DOM to match newEntries order.
-	// Skipped during active drags — Sortable owns the DOM during a drag and
-	// reordering here would fight its live preview, causing visual thrashing.
 	if (!ctx.dragging) {
 		const pathToCard = new Map<string, Element>();
 		body.querySelectorAll(`.${CSS_CLASSES.CARD}`).forEach((card) => {

@@ -1,7 +1,6 @@
 import type { App, BasesPropertyId } from 'obsidian';
-import { Notice, parsePropertyId, setIcon } from 'obsidian';
-import { QuickAddModal } from '../quickAddModal.ts';
-import { CSS_CLASSES, UNCATEGORIZED_LABEL } from '../constants.ts';
+import { Notice, parsePropertyId } from 'obsidian';
+import { UNCATEGORIZED_LABEL } from '../constants.ts';
 
 export interface QuickAddCtx {
 	app: App;
@@ -13,10 +12,12 @@ export interface QuickAddCtx {
 
 export interface QuickAddCallbacks {
 	createFileForView: (path: string, setFrontmatter: (fm: Record<string, unknown>) => void) => Promise<void>;
-	/** previousPaths: snapshot of vault markdown paths taken before createFileForView. */
-	moveFileToFolder: (previousPaths: Set<string>, baseFileName: string, targetFolder: string) => Promise<void>;
+	/** previousPaths: snapshot of vault markdown paths taken before createFileForView. Returns final file path, or null if not found. */
+	moveFileToFolder: (previousPaths: Set<string>, baseFileName: string, targetFolder: string) => Promise<string | null>;
 	/** Return current vault markdown file paths for snapshotting. */
 	getMarkdownFilePaths: () => Set<string>;
+	/** Called after the card file is created and placed; receives the final vault path. */
+	onCardCreated: (filePath: string, columnValue: string, swimlaneValue: string | null) => void;
 }
 
 function sanitizeBaseFileName(title: string): string {
@@ -29,32 +30,33 @@ function sanitizeBaseFileName(title: string): string {
 		.trim();
 }
 
-function todayDateFolder(): { yyyy: string; mm: string; dd: string } {
+function randomSuffix(len = 4): string {
+	const chars = 'abcdefghijklmnopqrstuvwxyz';
+	let out = '';
+	for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+	return out;
+}
+
+/**
+ * Build a unique datetime-stamped filename stem: YYYY-MM-DD_HH-MM_xxxx
+ * Dots are avoided in the stem (except the final .md extension) so Obsidian
+ * does not treat the time/suffix portion as a file extension and mangle the name.
+ * The four-character random suffix makes collisions practically impossible,
+ * but we still check and regenerate if one occurs.
+ */
+export function buildUniqueFileName(targetFolder: string, existingPaths: Set<string>): string {
 	const d = new Date();
-	return {
-		yyyy: String(d.getFullYear()),
-		mm: String(d.getMonth() + 1).padStart(2, '0'),
-		dd: String(d.getDate()).padStart(2, '0'),
-	};
-}
-
-/**
- * Build the dated subfolder path: baseFolder/YYYY/MM/DD
- */
-export function buildDateFolder(baseFolder: string): string {
-	const { yyyy, mm, dd } = todayDateFolder();
-	return `${baseFolder}/${yyyy}/${mm}/${dd}`;
-}
-
-/**
- * Build a unique filename (no extension) for the card.
- * Uses title as-is; on collision appends (2), (3), …
- */
-export function buildUniqueFileName(title: string, targetFolder: string, existingPaths: Set<string>): string {
-	const candidate = (n: number) => (n <= 1 ? title : `${title} (${n})`);
-	let n = 1;
-	while (existingPaths.has(`${targetFolder}/${candidate(n)}.md`)) n++;
-	return candidate(n);
+	const yyyy = String(d.getFullYear());
+	const mm = String(d.getMonth() + 1).padStart(2, '0');
+	const dd = String(d.getDate()).padStart(2, '0');
+	const hh = String(d.getHours()).padStart(2, '0');
+	const min = String(d.getMinutes()).padStart(2, '0');
+	const base = `${yyyy}-${mm}-${dd}_${hh}-${min}`;
+	let candidate: string;
+	do {
+		candidate = `${base}_${randomSuffix()}`;
+	} while (existingPaths.has(`${targetFolder}/${candidate}.md`));
+	return candidate;
 }
 
 function getWritableFrontmatterPropertyName(propertyId: BasesPropertyId | null): string | null {
@@ -117,17 +119,10 @@ export async function createQuickAddCard(
 		return;
 	}
 
-	// Ensure YYYY/MM/DD subfolder exists.
-	const targetFolder = buildDateFolder(baseFolder);
-	if (!ctx.app.vault.getFolderByPath(targetFolder)) {
-		try {
-			await ctx.app.vault.createFolder(targetFolder);
-		} catch {
-			// May already exist if created concurrently — continue.
-		}
-	}
-
 	const setFrontmatter = (frontmatter: Record<string, unknown>): void => {
+		// Store the file title and the datetime stamp as the filename property.
+		frontmatter['filename'] = baseFileName;
+
 		if (columnValue === UNCATEGORIZED_LABEL) {
 			delete frontmatter[columnPropertyName];
 		} else {
@@ -144,50 +139,13 @@ export async function createQuickAddCard(
 
 	try {
 		const previousPaths = cb.getMarkdownFilePaths();
-		const uniqueFileName = buildUniqueFileName(baseFileName, targetFolder, previousPaths);
+		const uniqueFileName = buildUniqueFileName(baseFolder, previousPaths);
 		await cb.createFileForView(uniqueFileName, setFrontmatter);
-		await cb.moveFileToFolder(previousPaths, uniqueFileName, targetFolder);
+		const finalPath = await cb.moveFileToFolder(previousPaths, uniqueFileName, baseFolder);
 		closeNativeNewItemPopover(ctx.doc);
+		if (finalPath) cb.onCardCreated(finalPath, columnValue, swimlaneValue);
 	} catch (error) {
 		console.error('Error creating kanban card:', error);
 		new Notice('Could not create card.');
 	}
-}
-
-export function createAddButton(
-	columnValue: string,
-	swimlaneValue: string | null,
-	ctx: QuickAddCtx,
-	cb: QuickAddCallbacks,
-): HTMLElement {
-	const btn = ctx.doc.createElement('div');
-	btn.className = CSS_CLASSES.COLUMN_ADD_BTN;
-	btn.setAttribute(
-		'aria-label',
-		swimlaneValue ? `Add card to column: ${columnValue} in lane: ${swimlaneValue}` : `Add card to column: ${columnValue}`,
-	);
-	btn.setAttribute('role', 'button');
-	btn.setAttribute('tabindex', '-1');
-	setIcon(btn, 'plus');
-
-	const open = () => {
-		if (!ctx.app) return;
-		new QuickAddModal(ctx.app, {
-			columnValue,
-			swimlaneValue,
-			onSubmit: (title) => createQuickAddCard(title, columnValue, swimlaneValue, ctx, cb),
-		}).open();
-	};
-
-	btn.addEventListener('click', (e) => {
-		e.stopPropagation();
-		open();
-	});
-	btn.addEventListener('keydown', (e) => {
-		if (e.key !== 'Enter' && e.key !== ' ') return;
-		e.preventDefault();
-		e.stopPropagation();
-		open();
-	});
-	return btn;
 }

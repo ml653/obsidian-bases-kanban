@@ -1,7 +1,7 @@
 import type { App, BasesEntry, BasesPropertyId } from 'obsidian';
 import { Keymap, NullValue } from 'obsidian';
 import type { TFile } from 'obsidian';
-import { CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { CSS_CLASSES, DATA_ATTRIBUTES, FILENAME_PROPERTY } from '../constants.ts';
 
 export interface CardRenderCtx {
 	app: App;
@@ -21,7 +21,7 @@ export interface CardCallbacks {
 	onSetActiveCard: (path: string | null) => void;
 	onOpenInBackgroundTab: (file: TFile) => void;
 	onFocusCard: (path: string) => void;
-	onRenameCard: (file: TFile, newName: string) => Promise<void>;
+	onUpdateFilenameProperty: (file: TFile, newTitle: string) => Promise<void>;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -31,8 +31,14 @@ export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): s
 		const val = entry.getValue(propId);
 		parts.push(val === null ? '' : val.toString());
 	}
-	if (ctx.cardTitlePropertyId) {
+	if (ctx.cardTitlePropertyId && !ctx.cardTitlePropertyId.startsWith('file.')) {
 		const val = entry.getValue(ctx.cardTitlePropertyId);
+		parts.push(val === null ? '' : val.toString());
+	}
+	// Always include the filename property in the fingerprint — it drives the
+	// displayed title whenever no non-file.* cardTitlePropertyId is configured.
+	{
+		const val = entry.getValue(FILENAME_PROPERTY);
 		parts.push(val === null ? '' : val.toString());
 	}
 	if (ctx.imagePropertyId) {
@@ -42,14 +48,41 @@ export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): s
 	return parts.join('\x00');
 }
 
+/**
+ * Resolve the display title for a card.
+ *
+ * Priority:
+ *   1. Explicit cardTitlePropertyId (if set and non-empty, and not a file.*
+ *      property whose value would be a raw timestamp basename).
+ *   2. The `filename` frontmatter property (human-readable title stored by
+ *      quick-add when file names are datetime stamps).
+ *   3. Raw file basename as last resort.
+ */
 export function renderCardTitle(titleEl: HTMLElement, entry: BasesEntry, ctx: CardRenderCtx): void {
+	// Helper: get the filename frontmatter value if present and non-empty.
+	const filenameText = (): string | null => {
+		const v = entry.getValue(FILENAME_PROPERTY);
+		if (!v || v instanceof NullValue) return null;
+		const t = v.toString().trim();
+		return t || null;
+	};
+
 	if (!ctx.cardTitlePropertyId) {
-		titleEl.textContent = entry.file.basename;
+		titleEl.textContent = filenameText() ?? entry.file.basename;
 		return;
 	}
+
+	// file.* properties (e.g. file.basename, file.name) resolve to the raw OS
+	// filename, which may be a datetime stamp. Prefer `filename` frontmatter
+	// when available so the human-readable title is shown instead.
+	if (ctx.cardTitlePropertyId.startsWith('file.')) {
+		titleEl.textContent = filenameText() ?? entry.file.basename;
+		return;
+	}
+
 	const titleValue = entry.getValue(ctx.cardTitlePropertyId);
 	if (!titleValue || titleValue instanceof NullValue) {
-		titleEl.textContent = entry.file.basename;
+		titleEl.textContent = filenameText() ?? entry.file.basename;
 		return;
 	}
 	titleValue.renderTo(titleEl, ctx.app.renderContext);
@@ -155,9 +188,12 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		const commit = async () => {
 			const newName = input.value.trim();
 			finish();
-			if (newName && newName !== entry.file.basename) {
-				await cb.onRenameCard(entry.file, newName);
-			}
+			if (!newName) return;
+			// Compare against the displayed title (filename property if present,
+			// otherwise the raw basename) so unchanged edits are no-ops.
+			const currentTitle = titleEl.textContent?.trim() ?? entry.file.basename;
+			if (newName === currentTitle) return;
+			await cb.onUpdateFilenameProperty(entry.file, newName);
 		};
 
 		input.addEventListener('keydown', (ke) => {
@@ -175,6 +211,8 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 
 	for (const propertyId of ctx.order) {
 		if (propertyId === ctx.groupByPropertyId) continue;
+		// filename is used as the card title — suppress it from the property list.
+		if (propertyId === FILENAME_PROPERTY) continue;
 		const value = entry.getValue(propertyId);
 		if (!value || value instanceof NullValue) continue;
 		if (!value.toString().trim()) continue;
@@ -222,6 +260,9 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 	};
 	cardEl.addEventListener('click', clickHandler);
 	cardEl.addEventListener('auxclick', clickHandler);
+
+	// Allow the keyboard handler to trigger inline editing via a custom event.
+	cardEl.addEventListener('obk:start-edit', () => startEditing(new Event('obk:start-edit')));
 
 	// Prevent middle-click autoscroll inside cards.
 	cardEl.addEventListener('mousedown', (e) => {

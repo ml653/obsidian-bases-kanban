@@ -16,6 +16,7 @@ export interface ColumnCallbacks {
 	onColorPickerClick: (anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string) => void;
 	onRemoveColumn: (columnValue: string, columnEl: HTMLElement) => void;
 	onToggleColumnHidden: (columnValue: string, hidden: boolean) => void;
+	onQuickAdd: (columnValue: string, swimlaneValue: string | null) => void;
 }
 
 export function applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
@@ -32,6 +33,20 @@ export function applyColumnColor(columnEl: HTMLElement, colorName: string | null
 	}
 	columnEl.style.setProperty('--obk-column-accent-color', cssVar);
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_COLOR, colorName);
+}
+
+function createAddButton(doc: Document, value: string, swimlaneValue: string | null, cb: ColumnCallbacks): HTMLElement {
+	const btn = doc.createElement('div');
+	btn.className = CSS_CLASSES.COLUMN_ADD_BTN;
+	btn.setAttribute('aria-label', `Add card to column: ${value}`);
+	btn.setAttribute('role', 'button');
+	btn.setAttribute('tabindex', '-1');
+	btn.textContent = '+';
+	btn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onQuickAdd(value, swimlaneValue);
+	});
+	return btn;
 }
 
 function createHideButton(doc: Document, value: string, cb: ColumnCallbacks): HTMLElement {
@@ -100,6 +115,16 @@ export function createColumn(
 	if (isHidden) {
 		headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
 		headerEl.appendChild(createUnhideButton(ctx.doc, value, cb));
+
+		// Render a (visually collapsed) card body so the column remains a valid
+		// drag-and-drop target. Cards dropped here adopt this column's value
+		// while the column stays collapsed.
+		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
+		bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+
+		entries.forEach((entry) => {
+			bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
+		});
 	} else {
 		const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
 		dragHandle.textContent = '⋮⋮';
@@ -119,6 +144,7 @@ export function createColumn(
 			headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
 		}
 
+		headerEl.appendChild(createAddButton(ctx.doc, value, options.swimlaneValue ?? null, cb));
 		headerEl.appendChild(createHideButton(ctx.doc, value, cb));
 
 		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
@@ -185,14 +211,35 @@ export function patchColumnCards(
 	});
 
 	if (!ctx.dragging) {
-		const pathToCard = new Map<string, Element>();
-		body.querySelectorAll(`.${CSS_CLASSES.CARD}`).forEach((card) => {
-			const path = card.instanceOf(HTMLElement) ? card.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) : null;
-			if (path) pathToCard.set(path, card);
-		});
-		newEntries.forEach((entry) => {
-			const card = pathToCard.get(entry.file.path);
-			if (card) body.appendChild(card);
-		});
+		// Reorder only when the DOM order doesn't already match the desired
+		// order. Re-appending nodes that are already in place is wasteful and
+		// disturbs the scroll position of the surrounding scroll containers, so
+		// we move the minimum number of nodes to fix the sequence.
+		const currentCards = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`));
+		const currentOrder = currentCards.map((c) => c.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH));
+		const desiredOrder = newEntries.map((e) => e.file.path);
+
+		const alreadyOrdered =
+			currentOrder.length === desiredOrder.length && currentOrder.every((p, i) => p === desiredOrder[i]);
+
+		if (!alreadyOrdered) {
+			const pathToCard = new Map<string, HTMLElement>();
+			currentCards.forEach((card) => {
+				const path = card.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH);
+				if (path) pathToCard.set(path, card);
+			});
+			// Walk the desired sequence and insert each card before the node that
+			// should follow it, skipping cards already in the right slot.
+			let referenceNode: ChildNode | null = body.firstChild;
+			newEntries.forEach((entry) => {
+				const card = pathToCard.get(entry.file.path);
+				if (!card) return;
+				if (card === referenceNode) {
+					referenceNode = card.nextSibling;
+				} else {
+					body.insertBefore(card, referenceNode);
+				}
+			});
+		}
 	}
 }

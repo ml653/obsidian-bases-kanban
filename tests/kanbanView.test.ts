@@ -2,6 +2,7 @@ import assert from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
 import { Notice } from 'obsidian';
 import type { BasesPropertyId } from 'obsidian';
+import { Menu } from './mocks/obsidian.ts';
 import {
 	CSS_CLASSES,
 	HOVER_LINK_SOURCE_ID,
@@ -666,7 +667,7 @@ describe('Data Rendering - Card Rendering', () => {
 		assert.ok(card.querySelector('.obk-card-title-input'), 'Inline edit input should appear');
 	});
 
-	test('Pencil button click opens file in workspace', () => {
+	test('Menu "Open note" action opens file in workspace', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -680,12 +681,153 @@ describe('Data Rendering - Card Rendering', () => {
 		assert.ok(card, 'Card should exist');
 
 		const entryPath = card.getAttribute('data-entry-path');
-		const pencilBtn = card.querySelector('.obk-card-edit-btn') as HTMLElement;
-		assert.ok(pencilBtn, 'Pencil button should exist');
-		pencilBtn.click();
+		const menuBtn = card.querySelector('.obk-card-menu-btn') as HTMLElement;
+		assert.ok(menuBtn, 'Menu button should exist');
+
+		Menu.instances.length = 0;
+		menuBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+		const menu = Menu.instances[Menu.instances.length - 1];
+		assert.ok(menu, 'A menu should have been opened');
+		const titles = menu.items.map((i) => i.title);
+		assert.deepStrictEqual(titles, ['Open note', 'Edit title', 'Delete'], 'Menu should list the card actions');
+
+		menu.trigger('Open note');
 
 		assert.strictEqual(app.workspace.openLinkText.calls.length, 1, 'openLinkText should be called');
 		assert.strictEqual(app.workspace.openLinkText.calls[0][0], entryPath, 'should open correct file');
+	});
+
+	test('Menu "Delete" action prompts for confirmation then trashes the file', async () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		const menuBtn = card.querySelector('.obk-card-menu-btn') as HTMLElement;
+
+		Menu.instances.length = 0;
+		menuBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		const menu = Menu.instances[Menu.instances.length - 1];
+		assert.ok(menu, 'A menu should have been opened');
+
+		// Nothing should be trashed before confirmation.
+		assert.strictEqual(app.fileManager.trashFile.calls.length, 0, 'trashFile should not be called yet');
+
+		menu.trigger('Delete');
+
+		// The confirm dialog should be on the page; click its Delete button.
+		const confirmBtn = document.querySelector('.modal-button-container .mod-warning') as HTMLElement;
+		assert.ok(confirmBtn, 'Confirmation dialog with a destructive button should appear');
+		confirmBtn.click();
+
+		// Allow the async deleteCard handler to resolve.
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.strictEqual(app.fileManager.trashFile.calls.length, 1, 'trashFile should be called after confirming');
+	});
+
+	test('Menu "Delete" action does not trash when the confirmation is cancelled', async () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		const menuBtn = card.querySelector('.obk-card-menu-btn') as HTMLElement;
+
+		Menu.instances.length = 0;
+		menuBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+		const menu = Menu.instances[Menu.instances.length - 1];
+		assert.ok(menu, 'A menu should have been opened');
+		menu.trigger('Delete');
+
+		// Cancel instead of confirming.
+		const buttons = Array.from(document.querySelectorAll('.modal-button-container button')) as HTMLElement[];
+		const cancelBtn = buttons.find((b) => b.textContent === 'Cancel');
+		assert.ok(cancelBtn, 'Cancel button should appear');
+		cancelBtn.click();
+
+		await Promise.resolve();
+		await Promise.resolve();
+
+		assert.strictEqual(app.fileManager.trashFile.calls.length, 0, 'trashFile should not be called when cancelled');
+	});
+
+	test('Collapsed (hidden) column keeps a sortable drop target so cards can be dragged into it', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		// Mark the "Done" column hidden via persisted prefs, scoped by group property.
+		controller.config.get = (key: string) => {
+			if (key === 'hiddenColumns') return { [PROPERTY_STATUS]: ['Done'] };
+			return null;
+		};
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const hiddenCol = view.containerEl.querySelector('.obk-column--hidden[data-column-value="Done"]') as HTMLElement;
+		assert.ok(hiddenCol, 'Done column should render in its collapsed (hidden) form');
+
+		const dropBody = hiddenCol.querySelector('.obk-column-body[data-sortable-container]');
+		assert.ok(dropBody, 'Collapsed column should still expose a sortable card body as a drop target');
+	});
+
+	test('Dropping a card into a collapsed column places it at the top of the order', async () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		// "Done" is collapsed; it already contains Task 4 and Task 5. Seed via the
+		// real persisted store so cardOrders writes/reads still work afterward.
+		controller.config.set?.('hiddenColumns', { [PROPERTY_STATUS]: ['Done'] });
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const toDoColumn = Array.from(view.containerEl.querySelectorAll('.obk-column')).find(
+			(col) => col.getAttribute('data-column-value') === 'To Do',
+		) as HTMLElement;
+		const doneColumn = view.containerEl.querySelector('.obk-column--hidden[data-column-value="Done"]') as HTMLElement;
+
+		const toDoBody = toDoColumn.querySelector('.obk-column-body') as HTMLElement;
+		const doneBody = doneColumn.querySelector('.obk-column-body') as HTMLElement;
+
+		const card = toDoBody.querySelector('.obk-card') as HTMLElement;
+		const movedPath = card.getAttribute('data-entry-path');
+		assert.ok(movedPath, 'dragged card should have a path');
+
+		// Sortable can't position inside a display:none body, so it appends the
+		// dragged card to the end of the destination DOM.
+		doneBody.appendChild(card);
+
+		const mockEvent = {
+			item: card,
+			from: toDoBody,
+			to: doneBody,
+			oldIndex: 0,
+			newIndex: 2,
+		};
+		await (view as any).handleCardDrop(mockEvent);
+
+		const savedOrders = controller.config.get('cardOrders') as Record<string, Record<string, string[]>>;
+		const doneOrder = savedOrders?.[PROPERTY_STATUS]?.['Done'];
+		assert.ok(Array.isArray(doneOrder), 'Done card order should be saved');
+		assert.strictEqual(doneOrder[0], movedPath, 'Card dropped into a collapsed column should be first');
 	});
 
 	test('Ctrl+click on card opens file in new leaf', () => {

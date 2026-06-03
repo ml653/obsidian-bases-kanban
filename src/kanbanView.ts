@@ -1,5 +1,5 @@
 import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
-import { BasesView, Keymap, Notice, normalizePath, parsePropertyId } from 'obsidian';
+import { BasesView, Keymap, Notice, Platform, normalizePath, parsePropertyId } from 'obsidian';
 import {
 	createCard as createCardEl,
 	computeCardFingerprint,
@@ -29,6 +29,7 @@ import {
 } from './components/row.ts';
 import { handleBoardKeydown } from './components/keyboard.ts';
 import { QuickAddModal } from './quickAddModal.ts';
+import { ConfirmModal } from './confirmModal.ts';
 import type { TFile } from 'obsidian';
 import Sortable from 'sortablejs';
 import {
@@ -156,6 +157,8 @@ export class KanbanView extends BasesView {
 	private _keyboardFocusPath: string | null = null;
 	/** Path of a newly-created card that needs focus. Immune to onFocusCard overwrites. */
 	private _pendingCreatedFocusPath: string | null = null;
+	/** Path of a newly-created card to scroll into view without focusing (mobile). */
+	private _pendingCreatedScrollPath: string | null = null;
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, legacyData: LegacyData | null = null) {
 		super(controller);
@@ -520,7 +523,9 @@ export class KanbanView extends BasesView {
 			const modeChanged = hasSwimlanes !== existingIsSwimlane;
 
 			if (!existingBoard || modeChanged || groupChanged || optionsChanged) {
+				const restoreScroll = this._captureBoardScroll();
 				this.fullRebuild(orderedValues, lanes, hasSwimlanes);
+				restoreScroll();
 			} else {
 				this.patchBoard(orderedValues, lanes, hasSwimlanes);
 			}
@@ -704,6 +709,56 @@ export class KanbanView extends BasesView {
 		this.render();
 	}
 
+	/**
+	 * Snapshot the board's scroll offsets and return a function that restores
+	 * them. Covers flat-mode horizontal board scroll, swimlane-mode vertical
+	 * board scroll, and each swimlane body's horizontal scroll. The restore runs
+	 * synchronously and is re-applied over the next few animation frames so it
+	 * survives transient layout passes after a rebuild/patch.
+	 *
+	 * This is what keeps the view from jumping back to the start when a card is
+	 * created or any reactive re-render occurs.
+	 */
+	private _captureBoardScroll(): () => void {
+		const boardEl = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
+		if (!boardEl) return () => {};
+
+		const boardLeft = boardEl.scrollLeft;
+		const boardTop = boardEl.scrollTop;
+		// Swimlane bodies scroll horizontally; key their offsets by lane value so
+		// they can be matched back up even if the elements are recreated.
+		const laneScroll = new Map<string, number>();
+		boardEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`).forEach((laneEl) => {
+			const laneVal = laneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE);
+			const body = laneEl.querySelector<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`);
+			if (laneVal !== null && body) laneScroll.set(laneVal, body.scrollLeft);
+		});
+
+		const apply = () => {
+			const liveBoard = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
+			if (!liveBoard) return;
+			if (liveBoard.scrollLeft !== boardLeft) liveBoard.scrollLeft = boardLeft;
+			if (liveBoard.scrollTop !== boardTop) liveBoard.scrollTop = boardTop;
+			laneScroll.forEach((left, laneVal) => {
+				const laneEl = liveBoard.querySelector<HTMLElement>(
+					`.${CSS_CLASSES.SWIMLANE}[${DATA_ATTRIBUTES.SWIMLANE_VALUE}="${CSS.escape(laneVal)}"]`,
+				);
+				const body = laneEl?.querySelector<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`);
+				if (body && body.scrollLeft !== left) body.scrollLeft = left;
+			});
+		};
+
+		return () => {
+			apply();
+			let frames = 3;
+			const tick = () => {
+				apply();
+				if (--frames > 0) window.requestAnimationFrame(tick);
+			};
+			window.requestAnimationFrame(tick);
+		};
+	}
+
 	private patchBoard(
 		orderedColumnValues: string[],
 		lanes: Map<string | null, Map<string, BasesEntry[]>>,
@@ -714,6 +769,10 @@ export class KanbanView extends BasesView {
 			console.error('KanbanView: patchBoard called but board element not found; skipping patch');
 			return;
 		}
+
+		// Preserve the board/swimlane scroll offsets across the patch so adding a
+		// card (or any reactive re-render) never jumps the view back to the start.
+		const restoreBoardScroll = this._captureBoardScroll();
 
 		// Card rebuilds and DOM re-parenting can clamp scrollTop. Capture up-front
 		// keyed by cardOrderKey(laneValue, colValue) and restore after layout settles.
@@ -832,6 +891,9 @@ export class KanbanView extends BasesView {
 				console.error('KanbanView: error restoring scroll positions', error);
 			}
 		});
+		// Restore board/swimlane scroll (synchronously and across the next frames
+		// to survive transient layout passes).
+		restoreBoardScroll();
 	}
 
 	private _patchColumns(
@@ -900,16 +962,24 @@ export class KanbanView extends BasesView {
 				);
 				if (cardBody) {
 					const key = this.cardOrderKey(laneValue, colValue);
-					const attachOnce = () => {
+					// Collapsed columns must be drop targets immediately so cards
+					// can be dragged into them; they have no visible body to
+					// pointerdown on. Visible columns defer attachment until first
+					// interaction as a performance optimization.
+					if (shouldBeHidden) {
 						this.attachCardSortable(cardBody, key);
-						this._deferredSortableListeners.delete(key);
-						cardBody.removeEventListener('pointerdown', attachOnce);
-					};
-					cardBody.addEventListener('pointerdown', attachOnce);
-					this._deferredSortableListeners.set(key, {
-						el: cardBody,
-						handler: attachOnce,
-					});
+					} else {
+						const attachOnce = () => {
+							this.attachCardSortable(cardBody, key);
+							this._deferredSortableListeners.delete(key);
+							cardBody.removeEventListener('pointerdown', attachOnce);
+						};
+						cardBody.addEventListener('pointerdown', attachOnce);
+						this._deferredSortableListeners.set(key, {
+							el: cardBody,
+							handler: attachOnce,
+						});
+					}
 				}
 			} else {
 				this.patchColumnCards(existingEl, entries);
@@ -1040,6 +1110,7 @@ export class KanbanView extends BasesView {
 			onColorPickerClick: (anchor, col, val) => this.openColorPicker(anchor, col, val),
 			onRemoveColumn: (val, el) => this.removeColumn(val, el),
 			onToggleColumnHidden: (val, hidden) => this.toggleColumnHidden(val, hidden),
+			onQuickAdd: (col, lane) => this.openQuickAddForColumn(col, lane),
 		};
 	}
 
@@ -1075,6 +1146,7 @@ export class KanbanView extends BasesView {
 				this._keyboardFocusPath = path;
 			},
 			onUpdateFilenameProperty: (file, newTitle) => this.updateFilenameProperty(file, newTitle),
+			onDeleteCard: (file) => this.confirmDeleteCard(file),
 		};
 	}
 
@@ -1096,6 +1168,22 @@ export class KanbanView extends BasesView {
 
 	private createCard(entry: BasesEntry): HTMLElement {
 		return createCardEl(entry, this._buildCardCtx(), this._buildCardCallbacks());
+	}
+
+	/**
+	 * Prompt for confirmation, then move the card's underlying note to the
+	 * configured trash location.
+	 */
+	private confirmDeleteCard(file: TFile): void {
+		if (!this.app) return;
+		const title = file.basename;
+		new ConfirmModal(this.app, {
+			title: 'Delete card',
+			message: `Delete "${title}"? The note will be moved to trash.`,
+			confirmText: 'Delete',
+			warning: true,
+			onConfirm: () => this.deleteCard(file.path, null),
+		}).open();
 	}
 
 	private applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
@@ -1176,12 +1264,49 @@ export class KanbanView extends BasesView {
 
 	private _buildQuickAddCallbacks(): QuickAddCallbacks {
 		return {
-			createFileForView: (path, setFm) => this.createFileForView(path, setFm),
+			createFileForView: (path, setFm) => this._createFileForViewKeepingFocus(path, setFm),
 			getMarkdownFilePaths: () => new Set(this.app?.vault.getMarkdownFiles().map((f) => f.path) ?? []),
 			moveFileToFolder: (prev, baseFileName, targetFolder) =>
 				this._moveCreatedFileToFolder(prev, baseFileName, targetFolder),
 			onCardCreated: (filePath, columnValue, swimlaneValue) => this._onCardCreated(filePath, columnValue, swimlaneValue),
 		};
+	}
+
+	/**
+	 * Wrap BasesView.createFileForView so quick-add never navigates away from
+	 * the board.
+	 *
+	 * On mobile Obsidian opens the freshly created note full-screen, pushing
+	 * the kanban view off-screen. We capture the kanban's leaf beforehand and
+	 * re-reveal it once creation settles. The note open can happen a frame or
+	 * two after our await resolves, so we restore aggressively over a few
+	 * delays to win that race without a visible flash.
+	 */
+	private async _createFileForViewKeepingFocus(
+		path: string,
+		setFm: (frontmatter: Record<string, unknown>) => void,
+	): Promise<void> {
+		const workspace = this.app?.workspace;
+		// Desktop keeps the existing behavior — the board stays put there.
+		if (!workspace || !Platform.isMobile) {
+			await this.createFileForView(path, setFm);
+			return;
+		}
+
+		const kanbanLeaf = workspace.getMostRecentLeaf();
+		await this.createFileForView(path, setFm);
+
+		if (!kanbanLeaf) return;
+		const restore = () => {
+			const active = workspace.getMostRecentLeaf();
+			if (active === kanbanLeaf) return;
+			workspace.setActiveLeaf(kanbanLeaf, { focus: false });
+			void workspace.revealLeaf(kanbanLeaf);
+		};
+		restore();
+		for (const delay of [0, 50, 150, 400]) {
+			window.setTimeout(restore, delay);
+		}
 	}
 
 	/**
@@ -1195,6 +1320,16 @@ export class KanbanView extends BasesView {
 			const order = (this._prefs.cardOrders[key] ?? []).filter((p) => p !== filePath);
 			this._prefs.cardOrders[key] = [filePath, ...order];
 			this._persistPrefs();
+		}
+		// On mobile, focusing the freshly created card causes Obsidian to open
+		// the note (or bring up the soft keyboard via the inline editor). The
+		// user asked that adding a task not open it, so we only scroll it into
+		// view without stealing focus. On desktop we keep the focus behavior so
+		// keyboard users can immediately act on the new card.
+		if (Platform.isMobile) {
+			this._pendingCreatedScrollPath = filePath;
+			this._pendingCreatedFocusPath = null;
+			return;
 		}
 		// Use a dedicated field immune to onFocusCard overwrites so Obsidian's
 		// modal-close focus restoration can't steal the target.
@@ -1318,10 +1453,12 @@ export class KanbanView extends BasesView {
 			chosenClass: CSS_CLASSES.CARD_CHOSEN,
 			onStart: (evt: Sortable.SortableEvent) => {
 				this._dragging = true;
+				this.containerEl.querySelector(`.${CSS_CLASSES.BOARD}`)?.classList.add(CSS_CLASSES.BOARD_CARD_DRAGGING);
 				if (evt.item.instanceOf(HTMLElement)) evt.item.classList.remove(CSS_CLASSES.CARD_HOVER);
 			},
 			onEnd: (evt: Sortable.SortableEvent) => {
 				this._dragging = false;
+				this.containerEl.querySelector(`.${CSS_CLASSES.BOARD}`)?.classList.remove(CSS_CLASSES.BOARD_CARD_DRAGGING);
 				this.setActiveCard(null);
 				void this.handleCardDrop(evt);
 			},
@@ -1407,7 +1544,14 @@ export class KanbanView extends BasesView {
 				const oldBody = oldColumnEl.querySelector(`.${CSS_CLASSES.COLUMN_BODY}`);
 				if (oldBody) this._prefs.cardOrders[oldKey] = getColumnPaths(oldBody);
 			}
-			this._prefs.cardOrders[newKey] = getColumnPaths(evt.to);
+			let newPaths = getColumnPaths(evt.to);
+			// Collapsed (hidden) destination columns render their cards with
+			// display:none, so Sortable can't position the drop — it lands at the
+			// end of the DOM. Force the dropped card to the top instead.
+			if (newColumnEl.classList.contains(CSS_CLASSES.COLUMN_HIDDEN)) {
+				newPaths = [entryPath, ...newPaths.filter((p) => p !== entryPath)];
+			}
+			this._prefs.cardOrders[newKey] = newPaths;
 			this._persistPrefs();
 		}
 
@@ -1564,11 +1708,83 @@ export class KanbanView extends BasesView {
 		if (!this.app) return;
 		const ctx = this._buildQuickAddCtx();
 		const cb = this._buildQuickAddCallbacks();
+		// On mobile the on-screen keyboard shrinks the leaf's visible height,
+		// which would otherwise reflow the percentage-height board and resize
+		// every column. Pin the container to its current pixel height for the
+		// lifetime of the modal so the columns stay put, and restore on close.
+		const unlockHeight = this._lockBoardHeightForModal();
 		new QuickAddModal(this.app, {
 			columnValue,
 			swimlaneValue,
 			onSubmit: (title) => createQuickAddCardEl(title, columnValue, swimlaneValue, ctx, cb),
+			onClose: () => unlockHeight(),
 		}).open();
+	}
+
+	/**
+	 * Freeze the board at its current (pre-keyboard) pixel height so the soft
+	 * keyboard's viewport resize doesn't reflow the columns or leave a black gap.
+	 *
+	 * Obsidian's mobile WebView resizes the leaf when the on-screen keyboard
+	 * opens; with a percentage-height board that reflows every column, and the
+	 * shrinking parent leaves an empty band above the keyboard. We snapshot the
+	 * height before the keyboard appears, pin both the leaf scroll element and
+	 * our container to it, and keep re-asserting that height on every
+	 * visualViewport resize for the lifetime of the modal. The keyboard then
+	 * simply overlays the bottom of the (unchanged) board. Restores on close.
+	 *
+	 * No-op off mobile.
+	 */
+	private _lockBoardHeightForModal(): () => void {
+		if (!Platform.isMobile) return () => {};
+		const container = this.containerEl;
+		const scrollEl = this.scrollEl;
+		const height = Math.round(scrollEl.getBoundingClientRect().height || container.getBoundingClientRect().height);
+		if (height <= 0) return () => {};
+
+		const px = `${height}px`;
+		const saved: Array<{ el: HTMLElement; height: string; maxHeight: string; minHeight: string }> = [];
+		const pin = (el: HTMLElement) => {
+			saved.push({ el, height: el.style.height, maxHeight: el.style.maxHeight, minHeight: el.style.minHeight });
+			el.style.height = px;
+			el.style.maxHeight = px;
+			el.style.minHeight = px;
+		};
+		// Pin our container, the leaf scroll element, and the leaf-content
+		// ancestor so neither the reflow nor a black gap can appear when the
+		// WebView shrinks for the keyboard.
+		const pinned: HTMLElement[] = [container, scrollEl];
+		const leafContent = scrollEl.closest<HTMLElement>('.workspace-leaf-content, .view-content');
+		if (leafContent && !pinned.includes(leafContent)) pinned.push(leafContent);
+		pinned.forEach(pin);
+
+		// Re-assert after layout settles (the keyboard can resize a frame or two
+		// later) and on every visualViewport change while the modal is open.
+		const reassert = () => {
+			for (const el of pinned) {
+				el.style.height = px;
+				el.style.maxHeight = px;
+				el.style.minHeight = px;
+			}
+		};
+		const vv = window.visualViewport;
+		vv?.addEventListener('resize', reassert);
+		vv?.addEventListener('scroll', reassert);
+		const timers = [0, 50, 150, 300, 600].map((d) => window.setTimeout(reassert, d));
+
+		let restored = false;
+		return () => {
+			if (restored) return;
+			restored = true;
+			vv?.removeEventListener('resize', reassert);
+			vv?.removeEventListener('scroll', reassert);
+			timers.forEach((t) => window.clearTimeout(t));
+			for (const s of saved) {
+				s.el.style.height = s.height;
+				s.el.style.maxHeight = s.maxHeight;
+				s.el.style.minHeight = s.minHeight;
+			}
+		};
 	}
 
 	private findCardEl(path: string): HTMLElement | null {
@@ -1656,6 +1872,23 @@ export class KanbanView extends BasesView {
 					cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 					if (this._pendingCreatedFocusPath === path) {
 						this._pendingCreatedFocusPath = null;
+					}
+				});
+			}
+			// Don't clear if not found yet — next render will retry.
+			return;
+		}
+
+		// Mobile: bring the new card into view without focusing it, so adding a
+		// task never opens the note or triggers the inline editor.
+		if (this._pendingCreatedScrollPath) {
+			const path = this._pendingCreatedScrollPath;
+			const cardEl = this.findCardEl(path);
+			if (cardEl) {
+				window.requestAnimationFrame(() => {
+					cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+					if (this._pendingCreatedScrollPath === path) {
+						this._pendingCreatedScrollPath = null;
 					}
 				});
 			}

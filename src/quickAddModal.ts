@@ -22,12 +22,26 @@ export class QuickAddModal extends Modal {
 
 	onOpen(): void {
 		const { columnValue, swimlaneValue } = this.options;
-		this.setTitle(swimlaneValue ? `Add card to ${swimlaneValue} / ${columnValue}` : `Add card to ${columnValue}`);
+		this.modalEl.classList.add(CSS_CLASSES.QUICK_ADD_MODAL);
+		this.setTitle('Add card');
 
 		const formEl = this.contentEl.createEl('form', { cls: CSS_CLASSES.QUICK_ADD_FORM });
-		this.input = new TextComponent(formEl);
+
+		// Destination context: show which lane / column the card lands in.
+		const destEl = formEl.createDiv({ cls: CSS_CLASSES.QUICK_ADD_DESTINATION });
+		destEl.createSpan({ text: 'Adding to', cls: CSS_CLASSES.QUICK_ADD_DESTINATION_LABEL });
+		if (swimlaneValue) {
+			destEl.createSpan({ text: swimlaneValue, cls: CSS_CLASSES.QUICK_ADD_DESTINATION_PILL });
+			destEl.createSpan({ text: '›', cls: CSS_CLASSES.QUICK_ADD_DESTINATION_SEP });
+		}
+		destEl.createSpan({ text: columnValue, cls: CSS_CLASSES.QUICK_ADD_DESTINATION_PILL });
+
+		const fieldEl = formEl.createDiv({ cls: CSS_CLASSES.QUICK_ADD_FIELD });
+		this.input = new TextComponent(fieldEl);
 		this.input.setPlaceholder('Card title');
 		this.input.inputEl.classList.add(CSS_CLASSES.QUICK_ADD_INPUT);
+		this.input.inputEl.setAttribute('enterkeyhint', 'done');
+		this.input.inputEl.setAttribute('autocapitalize', 'sentences');
 
 		const actionsEl = formEl.createDiv({ cls: CSS_CLASSES.QUICK_ADD_ACTIONS });
 		const cancelBtn = actionsEl.createEl('button', {
@@ -35,7 +49,7 @@ export class QuickAddModal extends Modal {
 			attr: { type: 'button' },
 		});
 		const submitBtn = actionsEl.createEl('button', {
-			text: 'Add',
+			text: 'Add card',
 			cls: 'mod-cta',
 			attr: { type: 'submit' },
 		});

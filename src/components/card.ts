@@ -1,5 +1,5 @@
 import type { App, BasesEntry, BasesPropertyId } from 'obsidian';
-import { Keymap, NullValue } from 'obsidian';
+import { Keymap, Menu, NullValue, setIcon } from 'obsidian';
 import type { TFile } from 'obsidian';
 import { CSS_CLASSES, DATA_ATTRIBUTES, FILENAME_PROPERTY } from '../constants.ts';
 
@@ -22,6 +22,7 @@ export interface CardCallbacks {
 	onOpenInBackgroundTab: (file: TFile) => void;
 	onFocusCard: (path: string) => void;
 	onUpdateFilenameProperty: (file: TFile, newTitle: string) => Promise<void>;
+	onDeleteCard: (file: TFile) => void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -143,21 +144,6 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 	const titleEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_TITLE });
 	renderCardTitle(titleEl, entry, ctx);
 
-	// Pencil button — opens the note (click on card body does inline edit)
-	const editBtn = cardEl.createDiv({ cls: CSS_CLASSES.CARD_EDIT_BTN });
-	editBtn.setAttribute('aria-label', 'Open note');
-	editBtn.setAttribute('role', 'button');
-	editBtn.setAttribute('tabindex', '-1');
-	editBtn.textContent = '✎';
-
-	editBtn.addEventListener('click', (e) => {
-		e.stopPropagation();
-		e.preventDefault();
-		if (!ctx.app?.workspace) return;
-		void ctx.app.workspace.openLinkText(filePath, '', false);
-	});
-	editBtn.addEventListener('mousedown', (e) => e.preventDefault());
-
 	let isEditing = false;
 
 	const startEditing = (e: Event) => {
@@ -169,13 +155,23 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		const currentTitle = titleEl.textContent ?? entry.file.basename;
 		cardEl.classList.add(CSS_CLASSES.CARD_EDITING);
 
-		const input = cardEl.doc.createElement('input');
-		input.type = 'text';
+		const input = cardEl.doc.createElement('textarea');
 		input.className = CSS_CLASSES.CARD_TITLE_INPUT;
+		input.rows = 1;
 		input.value = currentTitle;
 		titleEl.insertAdjacentElement('afterend', input);
+
+		// Auto-size the textarea to its content so long titles wrap and the
+		// field grows vertically instead of scrolling.
+		const autoSize = () => {
+			if (typeof input.setCssStyles !== 'function') return;
+			input.setCssStyles({ height: 'auto' });
+			input.setCssStyles({ height: `${input.scrollHeight}px` });
+		};
+
 		input.focus();
 		input.select();
+		autoSize();
 
 		const finish = () => {
 			if (!isEditing) return;
@@ -206,8 +202,56 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 			}
 			ke.stopPropagation();
 		});
+		input.addEventListener('input', autoSize);
 		input.addEventListener('blur', () => void commit());
 	};
+
+	const openMenu = (anchorEl: HTMLElement, event?: MouseEvent) => {
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle('Open note')
+				.setIcon('lucide-file-text')
+				.onClick(() => {
+					if (!ctx.app?.workspace) return;
+					void ctx.app.workspace.openLinkText(filePath, '', false);
+				}),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle('Edit title')
+				.setIcon('lucide-pencil')
+				.onClick(() => startEditing(new Event('obk:start-edit'))),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle('Delete')
+				.setIcon('lucide-trash-2')
+				.setWarning(true)
+				.onClick(() => cb.onDeleteCard(entry.file)),
+		);
+
+		if (event) {
+			menu.showAtMouseEvent(event);
+		} else {
+			const rect = anchorEl.getBoundingClientRect();
+			menu.showAtPosition({ x: rect.left, y: rect.bottom });
+		}
+	};
+
+	// Overflow menu button — opens an actions menu (open note, edit title, delete)
+	const menuBtn = cardEl.createDiv({ cls: CSS_CLASSES.CARD_MENU_BTN });
+	menuBtn.setAttribute('aria-label', 'Card actions');
+	menuBtn.setAttribute('role', 'button');
+	menuBtn.setAttribute('tabindex', '-1');
+	setIcon(menuBtn, 'lucide-more-vertical');
+
+	menuBtn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		e.preventDefault();
+		openMenu(menuBtn, e);
+	});
+	menuBtn.addEventListener('mousedown', (e) => e.preventDefault());
 
 	for (const propertyId of ctx.order) {
 		if (propertyId === ctx.groupByPropertyId) continue;
@@ -240,7 +284,7 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 
 	const clickHandler = (e: MouseEvent) => {
 		if (e.target instanceof Element && e.target.closest('a')) return;
-		if (e.target instanceof Element && e.target.closest(`.${CSS_CLASSES.CARD_EDIT_BTN}`)) return;
+		if (e.target instanceof Element && e.target.closest(`.${CSS_CLASSES.CARD_MENU_BTN}`)) return;
 		if (e.target instanceof Element && e.target.closest(`.${CSS_CLASSES.CARD_TITLE_INPUT}`)) return;
 		if (e.type === 'auxclick' && e.button !== 1) return;
 		cb.onSetActiveCard(filePath);

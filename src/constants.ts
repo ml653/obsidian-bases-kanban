@@ -59,6 +59,7 @@ export const CSS_CLASSES = {
 	VIEW_CONTAINER_WITH_SWIMLANES: 'obk-view-container--with-swimlanes',
 	BOARD: 'obk-board',
 	BOARD_WITH_SWIMLANES: 'obk-board--with-swimlanes',
+	BOARD_CARD_DRAGGING: 'obk-board--card-dragging',
 
 	// Swimlane (horizontal grouping band)
 	SWIMLANE: 'obk-swimlane',
@@ -95,7 +96,7 @@ export const CSS_CLASSES = {
 	CARD_COVER_FIT_CONTAIN: 'obk-card-cover--fit-contain',
 	CARD_ACTIVE: 'obk-card--active',
 	CARD_HOVER: 'obk-card--hover',
-	CARD_EDIT_BTN: 'obk-card-edit-btn',
+	CARD_MENU_BTN: 'obk-card-menu-btn',
 	CARD_TITLE_INPUT: 'obk-card-title-input',
 	CARD_EDITING: 'obk-card--editing',
 	CARD_DRAGGING: 'obk-card-dragging',
@@ -120,10 +121,19 @@ export const CSS_CLASSES = {
 	COLUMN_HIDDEN: 'obk-column--hidden',
 	COLUMN_UNHIDE_BTN: 'obk-column-unhide-btn',
 
+	// Column add-card button
+	COLUMN_ADD_BTN: 'obk-column-add-btn',
+
 	// Quick add modal
+	QUICK_ADD_MODAL: 'obk-quick-add-modal',
 	QUICK_ADD_FORM: 'obk-quick-add-form',
+	QUICK_ADD_FIELD: 'obk-quick-add-field',
 	QUICK_ADD_INPUT: 'obk-quick-add-input',
 	QUICK_ADD_ACTIONS: 'obk-quick-add-actions',
+	QUICK_ADD_DESTINATION: 'obk-quick-add-destination',
+	QUICK_ADD_DESTINATION_LABEL: 'obk-quick-add-destination-label',
+	QUICK_ADD_DESTINATION_PILL: 'obk-quick-add-destination-pill',
+	QUICK_ADD_DESTINATION_SEP: 'obk-quick-add-destination-sep',
 
 	// Color picker
 	COLUMN_COLOR_BTN: 'obk-column-color-btn',

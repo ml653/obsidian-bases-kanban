@@ -48,12 +48,14 @@ export interface App {
 		};
 		getMostRecentLeaf(): unknown;
 		setActiveLeaf(leaf: unknown, params?: { focus?: boolean }): void;
+		revealLeaf(leaf: unknown): Promise<void>;
 		trigger(name: string, ...data: unknown[]): void;
 		getActiveFile(): TFile | null;
 	};
 	fileManager: {
 		processFrontMatter(file: TFile, fn: (frontmatter: any) => void | Promise<void>): Promise<void>;
 		renameFile(file: TFile, newPath: string): Promise<void>;
+		trashFile(file: TFile): Promise<void>;
 	};
 	vault: {
 		getMarkdownFiles(): TFile[];
@@ -133,6 +135,74 @@ export function setIcon(parent: HTMLElement, iconId: string): void {
 	const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 	svg.setAttribute('data-icon', iconId);
 	parent.appendChild(svg);
+}
+
+export const Platform = {
+	isDesktop: true,
+	isMobile: false,
+	isDesktopApp: true,
+	isMobileApp: false,
+	isPhone: false,
+	isTablet: false,
+};
+
+export interface MenuItemDef {
+	title: string;
+	icon: string | null;
+	warning: boolean;
+	onClick: () => void;
+}
+
+// Minimal Menu mock. Tests can inspect `items` to find and trigger actions,
+// and `Menu.instances` collects every menu opened during a test.
+export class Menu {
+	static instances: Menu[] = [];
+	items: MenuItemDef[] = [];
+	shown = false;
+
+	addItem(cb: (item: MenuItemBuilder) => void): this {
+		const def: MenuItemDef = { title: '', icon: null, warning: false, onClick: () => {} };
+		cb(new MenuItemBuilder(def));
+		this.items.push(def);
+		return this;
+	}
+
+	showAtMouseEvent(_evt: MouseEvent): this {
+		this.shown = true;
+		Menu.instances.push(this);
+		return this;
+	}
+
+	showAtPosition(_pos: { x: number; y: number }): this {
+		this.shown = true;
+		Menu.instances.push(this);
+		return this;
+	}
+
+	/** Test helper: invoke the click handler of the item with the given title. */
+	trigger(title: string): void {
+		this.items.find((i) => i.title === title)?.onClick();
+	}
+}
+
+class MenuItemBuilder {
+	constructor(private readonly def: MenuItemDef) {}
+	setTitle(title: string): this {
+		this.def.title = title;
+		return this;
+	}
+	setIcon(icon: string | null): this {
+		this.def.icon = icon;
+		return this;
+	}
+	setWarning(warning: boolean): this {
+		this.def.warning = warning;
+		return this;
+	}
+	onClick(handler: () => void): this {
+		this.def.onClick = handler;
+		return this;
+	}
 }
 
 // Value type hierarchy mocks

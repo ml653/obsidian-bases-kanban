@@ -23,6 +23,16 @@ export interface CardCallbacks {
 	onFocusCard: (path: string) => void;
 	onUpdateFilenameProperty: (file: TFile, newTitle: string) => Promise<void>;
 	onDeleteCard: (file: TFile) => void;
+	/**
+	 * Notify the host view that inline title editing has begun. The view uses
+	 * this (on mobile) to pin the board height so the soft keyboard doesn't leave
+	 * a black gap, and to show a Done/Cancel toolbar above the keyboard. The
+	 * returned function is invoked when editing ends to tear that UI down.
+	 */
+	onInlineEditStart?: (
+		input: HTMLTextAreaElement,
+		actions: { commit: () => void; cancel: () => void },
+	) => (() => void) | void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -173,15 +183,24 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		input.select();
 		autoSize();
 
+		// Teardown for any host-provided editing UI (mobile keyboard toolbar /
+		// board-height lock). Set once onInlineEditStart resolves below.
+		let teardownEditUI: (() => void) | undefined;
+
 		const finish = () => {
 			if (!isEditing) return;
 			isEditing = false;
+			teardownEditUI?.();
+			teardownEditUI = undefined;
 			input.remove();
 			cardEl.classList.remove(CSS_CLASSES.CARD_EDITING);
 			cardEl.focus({ preventScroll: true });
 		};
 
 		const commit = async () => {
+			// Guard against re-entry: removing the focused input fires a trailing
+			// blur whose handler calls commit() again — bail once editing has ended.
+			if (!isEditing) return;
 			const newName = input.value.trim();
 			finish();
 			if (!newName) return;
@@ -204,6 +223,14 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		});
 		input.addEventListener('input', autoSize);
 		input.addEventListener('blur', () => void commit());
+
+		// Let the host view augment the edit (mobile keyboard toolbar + height
+		// lock). It returns a teardown invoked from finish() when editing ends.
+		const teardown = cb.onInlineEditStart?.(input, {
+			commit: () => void commit(),
+			cancel: finish,
+		});
+		teardownEditUI = typeof teardown === 'function' ? teardown : undefined;
 	};
 
 	const openMenu = (anchorEl: HTMLElement, event?: MouseEvent) => {

@@ -99,6 +99,9 @@ export const CSS_CLASSES = {
 	CARD_MENU_BTN: 'obk-card-menu-btn',
 	CARD_TITLE_INPUT: 'obk-card-title-input',
 	CARD_EDITING: 'obk-card--editing',
+	// Mobile inline-edit toolbar (rides above the on-screen keyboard).
+	CARD_EDIT_TOOLBAR: 'obk-card-edit-toolbar',
+	CARD_EDIT_TOOLBAR_BTN: 'obk-card-edit-toolbar-btn',
 	CARD_DRAGGING: 'obk-card-dragging',
 	CARD_GHOST: 'obk-card-ghost',
 	CARD_CHOSEN: 'obk-card-chosen',

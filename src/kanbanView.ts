@@ -1,5 +1,5 @@
 import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
-import { BasesView, Keymap, Notice, Platform, normalizePath, parsePropertyId } from 'obsidian';
+import { BasesView, Keymap, Notice, Platform, normalizePath, parsePropertyId, setIcon } from 'obsidian';
 import {
 	createCard as createCardEl,
 	computeCardFingerprint,
@@ -1147,6 +1147,82 @@ export class KanbanView extends BasesView {
 			},
 			onUpdateFilenameProperty: (file, newTitle) => this.updateFilenameProperty(file, newTitle),
 			onDeleteCard: (file) => this.confirmDeleteCard(file),
+			onInlineEditStart: (input, actions) => this._beginInlineEdit(input, actions),
+		};
+	}
+
+	/**
+	 * Augment an in-progress inline title edit on mobile.
+	 *
+	 * The soft keyboard shrinks the WebView and — without intervention — leaves a
+	 * black band above the keyboard while offering no editing toolbar. We pin the
+	 * board height (reusing the modal height-lock) so the keyboard simply overlays
+	 * the board, and float a Done/Cancel toolbar in the strip just above the
+	 * keyboard. Returns a teardown that removes both. No-op off mobile.
+	 */
+	private _beginInlineEdit(input: HTMLTextAreaElement, actions: { commit: () => void; cancel: () => void }): () => void {
+		if (!Platform.isMobile) return () => {};
+		const unlockHeight = this._lockBoardHeightForModal();
+		const removeToolbar = this._showInlineEditToolbar(actions);
+		// Once the keyboard settles, nudge the field into the visible strip above
+		// the keyboard and toolbar.
+		window.setTimeout(() => input.scrollIntoView({ block: 'center' }), 250);
+		let torn = false;
+		return () => {
+			if (torn) return;
+			torn = true;
+			removeToolbar();
+			unlockHeight();
+		};
+	}
+
+	/**
+	 * Build the floating inline-edit toolbar and position it just above the
+	 * on-screen keyboard using the visual viewport. Buttons act on pointerdown
+	 * (and preventDefault) so tapping them never blurs the textarea — that keeps
+	 * the keyboard up and lets Cancel skip the blur-driven commit. Returns a
+	 * teardown that removes the toolbar and its listeners.
+	 */
+	private _showInlineEditToolbar(actions: { commit: () => void; cancel: () => void }): () => void {
+		const doc = this.containerEl.doc;
+		const toolbar = doc.body.createDiv({ cls: CSS_CLASSES.CARD_EDIT_TOOLBAR });
+
+		const addButton = (icon: string, label: string, act: () => void, accent: boolean) => {
+			const btn = toolbar.createDiv({ cls: CSS_CLASSES.CARD_EDIT_TOOLBAR_BTN });
+			if (accent) btn.classList.add('mod-cta');
+			btn.setAttribute('role', 'button');
+			btn.setAttribute('aria-label', label);
+			setIcon(btn, icon);
+			btn.createSpan({ text: label });
+			btn.addEventListener('pointerdown', (e) => {
+				// Keep focus on the textarea (no blur ⇒ no premature commit) and run
+				// the action immediately.
+				e.preventDefault();
+				e.stopPropagation();
+				act();
+			});
+		};
+
+		addButton('lucide-x', 'Cancel', actions.cancel, false);
+		addButton('lucide-check', 'Done', actions.commit, true);
+
+		// Ride just above the keyboard: the gap between the layout viewport bottom
+		// and the visual viewport bottom is the keyboard's height.
+		const vv = window.visualViewport;
+		const reposition = () => {
+			const overlap = vv ? window.innerHeight - (vv.height + vv.offsetTop) : 0;
+			toolbar.style.bottom = `${Math.max(overlap, 0)}px`;
+		};
+		reposition();
+		vv?.addEventListener('resize', reposition);
+		vv?.addEventListener('scroll', reposition);
+		const timers = [0, 50, 150, 300, 600].map((d) => window.setTimeout(reposition, d));
+
+		return () => {
+			vv?.removeEventListener('resize', reposition);
+			vv?.removeEventListener('scroll', reposition);
+			timers.forEach((t) => window.clearTimeout(t));
+			toolbar.remove();
 		};
 	}
 

@@ -550,6 +550,48 @@
 	}
 }
 
+/* Mobile inline-edit toolbar — fills the strip above the on-screen keyboard
+   (otherwise a black gap) and gives touch users explicit Done / Cancel actions
+   while editing a card title inline. `bottom` is set inline from the visual
+   viewport so it rides just above the keyboard. */
+.obk-card-edit-toolbar {
+	position: fixed;
+	left: 0;
+	right: 0;
+	z-index: var(--layer-popover, 30);
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 12px;
+	padding-bottom: max(6px, env(safe-area-inset-bottom, 0px));
+	background: var(--background-secondary);
+	border-top: 1px solid var(--background-modifier-border);
+	box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.obk-card-edit-toolbar-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 40px;
+	padding: 0 16px;
+	border-radius: 6px;
+	font-size: var(--font-ui-medium);
+	font-weight: 500;
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+	cursor: pointer;
+	-webkit-user-select: none;
+	user-select: none;
+}
+
+.obk-card-edit-toolbar-btn.mod-cta {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
 .obk-card:focus {
 	outline: none;
 }

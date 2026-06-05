@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import { beforeEach, describe, test } from 'node:test';
 import { Notice } from 'obsidian';
 import type { BasesPropertyId } from 'obsidian';
-import { Menu } from './mocks/obsidian.ts';
+import { Menu, Platform } from './mocks/obsidian.ts';
 import {
 	CSS_CLASSES,
 	HOVER_LINK_SOURCE_ID,
@@ -665,6 +665,44 @@ describe('Data Rendering - Card Rendering', () => {
 		assert.strictEqual(app.workspace.openLinkText.calls.length, 0, 'openLinkText should not be called on regular click');
 		// The inline edit input should appear
 		assert.ok(card.querySelector('.obk-card-title-input'), 'Inline edit input should appear');
+	});
+
+	test('Mobile inline edit shows a Done/Cancel toolbar that tears down on finish', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const card = view.containerEl.querySelector('.obk-card') as HTMLElement;
+		assert.ok(card, 'Card should exist');
+
+		const doc = card.ownerDocument;
+		const toolbarSelector = `.${CSS_CLASSES.CARD_EDIT_TOOLBAR}`;
+
+		Platform.isMobile = true;
+		try {
+			card.click();
+			assert.ok(card.querySelector('.obk-card-title-input'), 'Inline edit input should appear');
+			const toolbar = doc.body.querySelector(toolbarSelector);
+			assert.ok(toolbar, 'Edit toolbar should appear above the keyboard on mobile');
+			assert.strictEqual(
+				toolbar?.querySelectorAll(`.${CSS_CLASSES.CARD_EDIT_TOOLBAR_BTN}`).length,
+				2,
+				'Toolbar has Done and Cancel',
+			);
+
+			// Escape ends editing — the toolbar must be torn down with the input.
+			const input = card.querySelector('.obk-card-title-input') as HTMLTextAreaElement;
+			input.dispatchEvent(new doc.defaultView!.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+			assert.strictEqual(card.querySelector('.obk-card-title-input'), null, 'Input removed on escape');
+			assert.strictEqual(doc.body.querySelector(toolbarSelector), null, 'Toolbar removed on escape');
+		} finally {
+			Platform.isMobile = false;
+		}
 	});
 
 	test('Menu "Open note" action opens file in workspace', () => {

@@ -101,6 +101,11 @@ export function createColumn(
 	columnEl.className = CSS_CLASSES.COLUMN;
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_VALUE, value);
 
+	// Hidden (collapsed) state is purely a CSS concern: every column renders the
+	// same DOM, and the `.obk-column--hidden` class drives which controls are
+	// shown (see styles.css). This lets collapse/expand be an in-place class
+	// toggle with no element add/remove, so the board is never rebuilt and the
+	// horizontal scroll position is preserved.
 	const isHidden = ctx.prefs.hiddenColumns.has(value);
 	if (isHidden) {
 		columnEl.classList.add(CSS_CLASSES.COLUMN_HIDDEN);
@@ -112,48 +117,37 @@ export function createColumn(
 
 	const headerEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_HEADER });
 
-	if (isHidden) {
-		headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
-		headerEl.appendChild(createUnhideButton(ctx.doc, value, cb));
+	const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
+	dragHandle.textContent = '⋮⋮';
 
-		// Render a (visually collapsed) card body so the column remains a valid
-		// drag-and-drop target. Cards dropped here adopt this column's value
-		// while the column stays collapsed.
-		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
-		bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+	const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
+	colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
+	colorBtn.setAttribute('role', 'button');
+	colorBtn.addEventListener('click', (e) => {
+		e.stopPropagation();
+		cb.onColorPickerClick(colorBtn, columnEl, value);
+	});
 
-		entries.forEach((entry) => {
-			bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
-		});
-	} else {
-		const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
-		dragHandle.textContent = '⋮⋮';
+	headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
+	headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
 
-		const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
-		colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
-		colorBtn.setAttribute('role', 'button');
-		colorBtn.addEventListener('click', (e) => {
-			e.stopPropagation();
-			cb.onColorPickerClick(colorBtn, columnEl, value);
-		});
-
-		headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
-		headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
-
-		if (entries.length === 0 && options.showRemoveButton !== false) {
-			headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
-		}
-
-		headerEl.appendChild(createAddButton(ctx.doc, value, options.swimlaneValue ?? null, cb));
-		headerEl.appendChild(createHideButton(ctx.doc, value, cb));
-
-		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
-		bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
-
-		entries.forEach((entry) => {
-			bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
-		});
+	if (entries.length === 0 && options.showRemoveButton !== false) {
+		headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
 	}
+
+	headerEl.appendChild(createAddButton(ctx.doc, value, options.swimlaneValue ?? null, cb));
+	headerEl.appendChild(createHideButton(ctx.doc, value, cb));
+	// Shown only when collapsed (CSS-gated); restores the column to full width.
+	headerEl.appendChild(createUnhideButton(ctx.doc, value, cb));
+
+	// The card body is always present so a collapsed column remains a valid
+	// drag-and-drop target. Cards dropped here adopt this column's value.
+	const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
+	bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+
+	entries.forEach((entry) => {
+		bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
+	});
 
 	return columnEl;
 }

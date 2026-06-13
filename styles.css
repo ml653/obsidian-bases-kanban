@@ -891,8 +891,15 @@
 	pointer-events: auto;
 }
 
+/* In the collapsed strip, only the title and unhide button are shown. Every
+   other control is rendered (so expand/collapse is a pure class toggle) but
+   hidden via CSS. */
 .obk-column--hidden .obk-column-drag-handle,
-.obk-column--hidden .obk-column-color-btn {
+.obk-column--hidden .obk-column-color-btn,
+.obk-column--hidden .obk-column-count,
+.obk-column--hidden .obk-column-add-btn,
+.obk-column--hidden .obk-column-menu-btn,
+.obk-column--hidden .obk-column-remove-btn {
 	display: none;
 }
 
@@ -942,12 +949,12 @@
 	white-space: nowrap;
 }
 
-/* Unhide button — shown only on hidden columns */
+/* Unhide button — shown only on hidden (collapsed) columns */
 .obk-column-unhide-btn {
+	display: none;
 	width: 24px;
 	height: 24px;
 	border-radius: 4px;
-	display: flex;
 	align-items: center;
 	justify-content: center;
 	font-size: 14px;
@@ -957,6 +964,10 @@
 	transition:
 		background 0.1s ease,
 		color 0.1s ease;
+}
+
+.obk-column--hidden .obk-column-unhide-btn {
+	display: flex;
 }
 
 .obk-column-unhide-btn:hover {

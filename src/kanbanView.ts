@@ -48,6 +48,16 @@ import {
 import type { DebouncedFn } from './utils/debounce.ts';
 import { debounce } from './utils/debounce.ts';
 import { ensureGroupExists, normalizePropertyValue } from './utils/grouping.ts';
+import {
+	type CardMoveContext,
+	type CardOrders,
+	moveCardToColumn as moveCardToColumnImpl,
+	moveToFront,
+	normalizeList,
+	removePath,
+	reorderCardInColumn as reorderCardInColumnImpl,
+	swapPath,
+} from './utils/cardOrder.ts';
 
 export interface LegacyData {
 	columnOrders: Record<string, string[]>;
@@ -159,6 +169,8 @@ export class KanbanView extends BasesView {
 	private _pendingCreatedFocusPath: string | null = null;
 	/** Path of a newly-created card to scroll into view without focusing (mobile). */
 	private _pendingCreatedScrollPath: string | null = null;
+	/** Guards the one-time cross-column/orphan cleanup; reset whenever prefs reload. */
+	private _didInitialCardOrderCleanup = false;
 	/**
 	 * Signature of the data + display options reflected in the current DOM.
 	 * render() skips all DOM work when the freshly-computed signature matches,
@@ -231,6 +243,28 @@ export class KanbanView extends BasesView {
 				console.error('KanbanView error:', error);
 			}
 		}, DEBOUNCE_DELAY);
+
+		// Persist card-order maintenance on explicit vault events (never during
+		// render). Rename swaps the old path for the new in place so the card
+		// keeps its slot; delete drops the path from every column's saved order.
+		if (typeof this.app?.vault?.on === 'function' && typeof this.registerEvent === 'function') {
+			this.registerEvent(
+				this.app.vault.on('rename', (file, oldPath) => {
+					if (!this._prefsPropertyId) return;
+					if (swapPath(this._prefs.cardOrders, oldPath, file.path)) {
+						this._persistPrefs();
+					}
+				}),
+			);
+			this.registerEvent(
+				this.app.vault.on('delete', (file) => {
+					if (!this._prefsPropertyId) return;
+					if (removePath(this._prefs.cardOrders, file.path)) {
+						this._persistPrefs();
+					}
+				}),
+			);
+		}
 	}
 
 	onDataUpdated(): void {
@@ -275,6 +309,8 @@ export class KanbanView extends BasesView {
 	private _loadPrefs(propertyId: BasesPropertyId, swimlanePropertyId: BasesPropertyId | null): void {
 		this._prefsPropertyId = propertyId;
 		this._prefsSwimlanePropertyId = swimlanePropertyId;
+		// New prefs scope → run the one-time cleanup again on the next render.
+		this._didInitialCardOrderCleanup = false;
 		const swimlaneScopedKey = swimlanePropertyId ? this.swimlanePrefsKey(propertyId, swimlanePropertyId) : null;
 
 		// Column order — with legacy migration
@@ -356,6 +392,14 @@ export class KanbanView extends BasesView {
 		const swimlaneScopedKey = this._prefsSwimlanePropertyId
 			? this.swimlanePrefsKey(this._prefsPropertyId, this._prefsSwimlanePropertyId)
 			: null;
+
+		// Normalize before every write: dedupe each column list so a path can
+		// never appear twice (collision cleanup).
+		const normalizedCardOrders: CardOrders = {};
+		for (const [key, list] of Object.entries(this._prefs.cardOrders)) {
+			normalizedCardOrders[key] = normalizeList(list);
+		}
+		this._prefs.cardOrders = normalizedCardOrders;
 
 		this._persistConfigKey('columnOrders', isColumnOrders, this._prefs.columnOrder, this._prefsPropertyId);
 		this._persistConfigKey(
@@ -449,22 +493,35 @@ export class KanbanView extends BasesView {
 
 			// Apply manual card order only when the Base itself is not sorted.
 			// When sorting is active, Bases has already ordered `entries`.
-			if (!sortActive && groupedByLane) {
-				groupedByLane.forEach((columns, laneValue) => {
-					columns.forEach((cellEntries, columnValue) => {
-						const savedOrder = this._prefs.cardOrders[this.cardOrderKey(laneValue, columnValue)];
-						if (savedOrder) {
-							columns.set(columnValue, this.applyCardOrder(cellEntries, savedOrder));
-						}
+			//
+			// Ordering is applied here as a PURE read: render never mutates
+			// `_prefs.cardOrders` and never persists. applyCardOrder lays cards out
+			// in the saved order and prepends any not-yet-ordered cards (sorted by
+			// filename) for display only. Persistence happens exclusively on
+			// explicit events (quick-add, keyboard move/reorder, drag, rename,
+			// delete), which keeps render free of config.set() and avoids both the
+			// feedback loop and the stale-data race during async frontmatter writes.
+			//
+			// A one-time cleanup right after load (no in-flight writes, so race
+			// free) drops orphans and resolves cross-column duplicates.
+			if (!sortActive) {
+				if (!this._didInitialCardOrderCleanup) {
+					this._cleanupCardOrders(groupedByLane, groupedEntries);
+					this._didInitialCardOrderCleanup = true;
+				}
+				if (groupedByLane) {
+					groupedByLane.forEach((columns, laneValue) => {
+						columns.forEach((cellEntries, columnValue) => {
+							const key = this.cardOrderKey(laneValue, columnValue);
+							columns.set(columnValue, this.applyCardOrder(cellEntries, this._prefs.cardOrders[key] ?? []));
+						});
 					});
-				});
-			} else if (!sortActive) {
-				groupedEntries.forEach((columnEntries, value) => {
-					const savedOrder = this._prefs.cardOrders[this.cardOrderKey(null, value)];
-					if (savedOrder) {
-						groupedEntries.set(value, this.applyCardOrder(columnEntries, savedOrder));
-					}
-				});
+				} else {
+					groupedEntries.forEach((columnEntries, value) => {
+						const key = this.cardOrderKey(null, value);
+						groupedEntries.set(value, this.applyCardOrder(columnEntries, this._prefs.cardOrders[key] ?? []));
+					});
+				}
 			}
 
 			// Merge any newly-seen column values into prefs and persist eagerly.
@@ -941,29 +998,12 @@ export class KanbanView extends BasesView {
 			const entries = groupedEntries.get(colValue) ?? [];
 			const existingEl = existingColumns.get(colValue);
 
-			// Rebuild the column if its hidden state has changed — patchColumnCards
-			// cannot add/remove the card body or swap the header controls.
+			// Hidden state is a pure class toggle applied in place by
+			// toggleColumnHidden, so an existing column's DOM never needs rebuilding
+			// to reflect a collapse — we only create columns that don't exist yet.
 			const shouldBeHidden = this._prefs.hiddenColumns.has(colValue);
-			const isCurrentlyHidden = existingEl?.classList.contains(CSS_CLASSES.COLUMN_HIDDEN) ?? false;
-			const hiddenStateChanged = existingEl !== undefined && shouldBeHidden !== isCurrentlyHidden;
 
-			if (!existingEl || hiddenStateChanged) {
-				if (existingEl && hiddenStateChanged) {
-					// Destroy any sortable on the old element before replacing.
-					const key = this.cardOrderKey(laneValue, colValue);
-					const s = this._columnSortables.get(key);
-					if (s) {
-						s.destroy();
-						this._columnSortables.delete(key);
-					}
-					const deferred = this._deferredSortableListeners.get(key);
-					if (deferred) {
-						deferred.el.removeEventListener('pointerdown', deferred.handler);
-						this._deferredSortableListeners.delete(key);
-					}
-					existingEl.remove();
-					existingColumns.delete(colValue);
-				}
+			if (!existingEl) {
 				const options = laneValue !== null ? { showRemoveButton: false as const, swimlaneValue: laneValue } : {};
 				const colEl = this.createColumn(colValue, entries, options);
 				containerEl.appendChild(colEl);
@@ -1010,10 +1050,11 @@ export class KanbanView extends BasesView {
 
 	/**
 	 * Build a string that captures everything the board DOM reflects: display
-	 * options, column/lane order, per-cell card identity+content, colors and
-	 * hidden columns. Collapse state is intentionally omitted because it is
-	 * applied directly to the DOM, so a collapse-only change yields an identical
-	 * signature and render() skips the rebuild.
+	 * options, column/lane order, per-cell card identity+content and colors.
+	 * Collapse state (swimlane collapse and column hide) is intentionally omitted
+	 * because it is applied directly to the DOM as a class toggle, so a
+	 * collapse-only change yields an identical signature and render() skips the
+	 * rebuild.
 	 */
 	private _computeRenderSignature(
 		orderedColumnValues: string[],
@@ -1025,7 +1066,6 @@ export class KanbanView extends BasesView {
 		const parts: string[] = [optionsSignature];
 		parts.push(`cols:${orderedColumnValues.join('\x1f')}`);
 		parts.push(`colors:${JSON.stringify(this._prefs.columnColors)}`);
-		parts.push(`hidden:${Array.from(this._prefs.hiddenColumns).sort().join('\x1f')}`);
 
 		const laneKeys = hasSwimlanes
 			? this.getOrderedSwimlaneValues([...lanes.keys()].filter((k): k is string => k !== null))
@@ -1361,14 +1401,13 @@ export class KanbanView extends BasesView {
 
 	/**
 	 * Called after a quick-add card has been created and placed in the vault.
-	 * Appends it to the bottom of the saved card order for its column so it
-	 * renders last, then polls until the card DOM element appears and focuses it.
+	 * Prepends it to the front of its column's saved order (removing it from any
+	 * other column first, so it can't be duplicated) and persists — an explicit
+	 * ordering event. Then schedules focus/scroll once its element appears.
 	 */
 	private _onCardCreated(filePath: string, columnValue: string, swimlaneValue: string | null): void {
 		if (this._prefsPropertyId) {
-			const key = this.cardOrderKey(swimlaneValue, columnValue);
-			const order = (this._prefs.cardOrders[key] ?? []).filter((p) => p !== filePath);
-			this._prefs.cardOrders[key] = [filePath, ...order];
+			moveToFront(this._prefs.cardOrders, this.cardOrderKey(swimlaneValue, columnValue), filePath);
 			this._persistPrefs();
 		}
 		// On mobile, focusing the freshly created card causes Obsidian to open
@@ -1476,9 +1515,47 @@ export class KanbanView extends BasesView {
 		} else {
 			this._prefs.hiddenColumns.delete(value);
 		}
+
+		// Apply the collapse directly to the DOM, in place, for every column with
+		// this value (there is one per swimlane). The DOM is identical in both
+		// states — only the `.obk-column--hidden` class differs — so this never
+		// rebuilds the board and the horizontal scroll position is preserved.
+		// Mirrors toggleSwimlaneCollapsed; hidden state is excluded from the
+		// render signature so the config.set() persistence below is a no-op render.
+		const board = this.containerEl.querySelector(`.${CSS_CLASSES.BOARD}`);
+		board?.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.COLUMN}`).forEach((colEl) => {
+			if (colEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE) !== value) return;
+			colEl.classList.toggle(CSS_CLASSES.COLUMN_HIDDEN, hidden);
+			if (hidden) {
+				colEl.setAttribute(DATA_ATTRIBUTES.COLUMN_HIDDEN, 'true');
+				// A collapsed body is non-interactive, so it can never receive the
+				// pointerdown that lazily attaches a visible column's sortable. Attach
+				// now so the strip is a drop target immediately.
+				this.ensureColumnSortable(colEl, value);
+			} else {
+				colEl.removeAttribute(DATA_ATTRIBUTES.COLUMN_HIDDEN);
+			}
+		});
+
 		this._persistPrefs();
-		// Rebuild so unhidden columns get their card body populated.
-		this.render(true);
+	}
+
+	/**
+	 * Attach the card sortable for a column immediately if it isn't already
+	 * attached, flushing any pending deferred-attach listener first.
+	 */
+	private ensureColumnSortable(colEl: HTMLElement, value: string): void {
+		const laneEl = colEl.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
+		const laneValue = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) ?? null;
+		const key = this.cardOrderKey(laneValue, value);
+		if (this._columnSortables.has(key)) return;
+		const deferred = this._deferredSortableListeners.get(key);
+		if (deferred) {
+			deferred.el.removeEventListener('pointerdown', deferred.handler);
+			this._deferredSortableListeners.delete(key);
+		}
+		const body = colEl.querySelector<HTMLElement>(`.${CSS_CLASSES.COLUMN_BODY}[${DATA_ATTRIBUTES.SORTABLE_CONTAINER}]`);
+		if (body) this.attachCardSortable(body, key);
 	}
 
 	private attachCardSortable(body: HTMLElement, value: string): void {
@@ -1514,6 +1591,54 @@ export class KanbanView extends BasesView {
 			},
 		});
 		this._columnSortables.set(value, sortable);
+	}
+
+	/**
+	 * Capture the post-drag card order from the DOM into `_prefs.cardOrders`.
+	 *
+	 * This is the only place that reads order from the DOM, and it exists because
+	 * Sortable applies a drag *purely to the DOM*: a same-column reorder changes
+	 * nothing in `this.data.data`, and a cross-column drop's exact landing
+	 * position is likewise DOM-only. The reconcile step (which rebuilds from the
+	 * data/query order) therefore cannot see a drag and would revert it.
+	 *
+	 * Walks every column body, recording each card's entry path in DOM order,
+	 * skipping Sortable's transient drag clone (the `seen` set). Stale keys and
+	 * cross-column uniqueness are also handled here, but the next render's
+	 * reconcile + normalize would enforce both anyway — capturing drag intent is
+	 * the irreplaceable job.
+	 */
+	private rebuildCardOrdersFromDOM(): void {
+		const boardEl = this.containerEl.querySelector<HTMLElement>(`.${CSS_CLASSES.BOARD}`);
+		if (!boardEl) {
+			console.warn('rebuildCardOrdersFromDOM: board element not found');
+			return;
+		}
+
+		const seen = new Set<string>();
+		const rebuilt: Record<string, string[]> = {};
+
+		boardEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.COLUMN_BODY}`).forEach((body) => {
+			const colEl = body.closest<HTMLElement>(`.${CSS_CLASSES.COLUMN}`);
+			const colVal = colEl?.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
+			if (!colVal) return;
+			const laneEl = body.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
+			const laneVal = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) ?? null;
+			const key = this.cardOrderKey(laneVal, colVal);
+
+			const paths: string[] = [];
+			body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`).forEach((card) => {
+				const path = card.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH);
+				// Skip Sortable's drag clone/placeholder and any path already
+				// claimed by an earlier cell so each path is recorded exactly once.
+				if (!path || seen.has(path)) return;
+				seen.add(path);
+				paths.push(path);
+			});
+			rebuilt[key] = paths;
+		});
+
+		this._prefs.cardOrders = rebuilt;
 	}
 
 	private async handleCardDrop(evt: Sortable.SortableEvent): Promise<void> {
@@ -1564,17 +1689,10 @@ export class KanbanView extends BasesView {
 			: null;
 		const newLaneValue = swimlaneActive ? newLaneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) : null;
 
-		// Helper: read card paths from a column body element
-		const getColumnPaths = (bodyEl: Element): string[] =>
-			Array.from(bodyEl.querySelectorAll(`.${CSS_CLASSES.CARD}`))
-				.map((c) => (c.instanceOf(HTMLElement) ? c.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) : null))
-				.filter((p): p is string => p !== null);
-
-		const oldKey = this.cardOrderKey(oldLaneValue, oldColumnValue ?? '');
 		const newKey = this.cardOrderKey(newLaneValue, newColumnValue);
 		const sortActive = this.hasActiveSort();
 
-		// Same cell reorder: update prefs and persist
+		// Same cell reorder
 		if (oldLaneValue === newLaneValue && oldColumnValue === newColumnValue) {
 			if (sortActive) {
 				if (this.didSortableIndexChange(evt)) {
@@ -1583,25 +1701,27 @@ export class KanbanView extends BasesView {
 				this.render(true);
 				return;
 			}
-			this._prefs.cardOrders[newKey] = getColumnPaths(evt.to);
+			// Rebuild every column's order from the authoritative DOM so stale or
+			// duplicated entries can't accumulate.
+			this.rebuildCardOrdersFromDOM();
 			this._persistPrefs();
 			return;
 		}
 
-		// Cross-cell drop: capture DOM order for both source and destination
+		// Cross-cell drop
 		if (!sortActive) {
-			if (oldColumnEl?.instanceOf(HTMLElement) && oldColumnValue) {
-				const oldBody = oldColumnEl.querySelector(`.${CSS_CLASSES.COLUMN_BODY}`);
-				if (oldBody) this._prefs.cardOrders[oldKey] = getColumnPaths(oldBody);
-			}
-			let newPaths = getColumnPaths(evt.to);
+			// Rebuild every column's order from the authoritative DOM. This
+			// captures both the source and destination columns (and every other
+			// column) in one pass, and guarantees no path appears in more than one
+			// column's order — eliminating the duplication seen with per-key updates.
+			this.rebuildCardOrdersFromDOM();
 			// Collapsed (hidden) destination columns render their cards with
 			// display:none, so Sortable can't position the drop — it lands at the
 			// end of the DOM. Force the dropped card to the top instead.
 			if (newColumnEl.classList.contains(CSS_CLASSES.COLUMN_HIDDEN)) {
-				newPaths = [entryPath, ...newPaths.filter((p) => p !== entryPath)];
+				const existing = this._prefs.cardOrders[newKey] ?? [];
+				this._prefs.cardOrders[newKey] = [entryPath, ...existing.filter((p) => p !== entryPath)];
 			}
-			this._prefs.cardOrders[newKey] = newPaths;
 			this._persistPrefs();
 		}
 
@@ -1647,43 +1767,36 @@ export class KanbanView extends BasesView {
 	}
 
 	/**
-	 * Move a card to a different column by updating its group-by frontmatter
-	 * property.  Used by keyboard navigation (Cmd/Ctrl + Arrow).
+	 * Dependencies the extracted card-move functions in cardOrder.ts need.
+	 * Built fresh per call so it always reflects current view state.
 	 */
-	private async moveCardToColumn(entryPath: string, newColumnValue: string): Promise<void> {
-		if (!this._prefsPropertyId || !this.app?.fileManager) return;
-		const entry = this._entryMap.get(entryPath);
-		if (!entry) return;
-
-		// Preserve focus on this card after the re-render triggered by the write.
-		this._keyboardFocusPath = entryPath;
-
-		// Prepend to the destination column order so it lands at the top.
-		const newKey = this.cardOrderKey(null, newColumnValue);
-		const existingDestOrder = (this._prefs.cardOrders[newKey] ?? []).filter((p) => p !== entryPath);
-		this._prefs.cardOrders[newKey] = [entryPath, ...existingDestOrder];
-		this._persistPrefs();
-
-		const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
-		const columnValueToSet = newColumnValue === UNCATEGORIZED_LABEL ? '' : newColumnValue;
-
-		try {
-			await this.app.fileManager.processFrontMatter(entry.file, (frontmatter: Record<string, unknown>) => {
-				if (columnValueToSet === '') {
-					delete frontmatter[columnPropertyName];
-				} else {
-					frontmatter[columnPropertyName] = columnValueToSet;
-				}
-			});
-		} catch (error) {
-			console.error('Error moving card via keyboard:', error);
-			this.render(true);
-		}
+	private _cardMoveContext(): CardMoveContext {
+		return {
+			app: this.app,
+			prefsPropertyId: this._prefsPropertyId,
+			cardOrders: this._prefs.cardOrders,
+			entryMap: this._entryMap,
+			cardOrderKey: (swimlaneValue, columnValue) => this.cardOrderKey(swimlaneValue, columnValue),
+			findCardEl: (path) => this.findCardEl(path),
+			persistPrefs: () => this._persistPrefs(),
+			setKeyboardFocusPath: (path) => {
+				this._keyboardFocusPath = path;
+			},
+			rerender: () => this.render(true),
+		};
 	}
 
 	/**
-	 * Reorder a card up or down within its column via keyboard (Cmd/Ctrl+Up/Down).
-	 * Updates the DOM immediately and persists the new card order.
+	 * Move a card to a different column (Cmd/Ctrl + Left/Right). Delegates to
+	 * cardOrder.ts; see moveCardToColumn there.
+	 */
+	private moveCardToColumn(entryPath: string, newColumnValue: string): Promise<void> {
+		return moveCardToColumnImpl(this._cardMoveContext(), entryPath, newColumnValue);
+	}
+
+	/**
+	 * Reorder a card within its column (Cmd/Ctrl + Up/Down). Delegates to
+	 * cardOrder.ts; see reorderCardInColumn there.
 	 */
 	private reorderCardInColumn(
 		entryPath: string,
@@ -1691,45 +1804,7 @@ export class KanbanView extends BasesView {
 		swimlaneValue: string | null,
 		direction: 'up' | 'down',
 	): void {
-		const cardEl = this.findCardEl(entryPath);
-		if (!cardEl) return;
-
-		const columnSelector = `.${CSS_CLASSES.COLUMN}`;
-		const columnEl = cardEl.closest<HTMLElement>(columnSelector);
-		if (!columnEl) return;
-
-		const body = columnEl.querySelector<HTMLElement>(`.${CSS_CLASSES.COLUMN_BODY}`);
-		if (!body) return;
-
-		const cards = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`));
-		const idx = cards.indexOf(cardEl);
-		if (idx === -1) return;
-
-		const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-		if (targetIdx < 0 || targetIdx >= cards.length) return;
-
-		const sibling = cards[targetIdx];
-
-		// Swap in DOM
-		if (direction === 'up') {
-			body.insertBefore(cardEl, sibling);
-		} else {
-			body.insertBefore(cardEl, sibling.nextSibling);
-		}
-
-		// Persist the new order
-		this._keyboardFocusPath = entryPath;
-		const newOrder = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`))
-			.map((c) => c.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH))
-			.filter((p): p is string => p !== null);
-
-		const key = this.cardOrderKey(swimlaneValue, columnValue);
-		this._prefs.cardOrders[key] = newOrder;
-		this._persistPrefs();
-
-		// Re-focus immediately since we moved the DOM node (focus stays on the element)
-		cardEl.focus({ preventScroll: true });
-		cardEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		reorderCardInColumnImpl(this._cardMoveContext(), entryPath, columnValue, swimlaneValue, direction);
 	}
 
 	/** Trash the card file (Ctrl+Delete). Moves focus to focusPath after deletion. */
@@ -2061,11 +2136,75 @@ export class KanbanView extends BasesView {
 		return [...this._prefs.columnOrder, ...newValues];
 	}
 
+	/**
+	 * One-time, race-free cleanup run on the first render after prefs are
+	 * loaded. Using the live grouping as the source of truth it: drops orphan
+	 * paths (files the Base no longer pulls), removes a path from any column it
+	 * is NOT actually live in, and dedupes — so a file can never remain listed
+	 * in two columns at once. Persists once if anything changed.
+	 *
+	 * This is NOT run on every render: render is a pure read. The cleanup is safe
+	 * to persist here because it only runs immediately after load, before any
+	 * in-flight frontmatter write could make the live grouping stale.
+	 */
+	private _cleanupCardOrders(
+		groupedByLane: Map<string, Map<string, BasesEntry[]>> | null,
+		groupedEntries: Map<string, BasesEntry[]>,
+	): void {
+		// path -> the single cardOrderKey it is actually live in
+		const liveKeyOf = new Map<string, string>();
+		const record = (key: string, entries: BasesEntry[]): void => {
+			entries.forEach((e) => liveKeyOf.set(e.file.path, key));
+		};
+		if (groupedByLane) {
+			groupedByLane.forEach((columns, laneValue) => {
+				columns.forEach((entries, columnValue) => record(this.cardOrderKey(laneValue, columnValue), entries));
+			});
+		} else {
+			groupedEntries.forEach((entries, columnValue) => record(this.cardOrderKey(null, columnValue), entries));
+		}
+
+		let changed = false;
+		const seen = new Set<string>();
+		const cleaned: CardOrders = {};
+		for (const [key, list] of Object.entries(this._prefs.cardOrders)) {
+			const kept: string[] = [];
+			for (const path of list) {
+				// Keep only paths that are live in THIS column and not already
+				// claimed by an earlier column (cross-column dedupe + orphan prune).
+				if (liveKeyOf.get(path) === key && !seen.has(path)) {
+					seen.add(path);
+					kept.push(path);
+				} else {
+					changed = true;
+				}
+			}
+			cleaned[key] = kept;
+		}
+
+		if (changed) {
+			this._prefs.cardOrders = cleaned;
+			this._persistPrefs();
+		}
+	}
+
+	/**
+	 * Lay entries out for display in the saved order.
+	 *
+	 * Cards present in `savedOrder` keep that order; cards not yet in it (newly
+	 * created, externally added, or just moved into this column) are sorted by
+	 * filename and prepended to the front. When `savedOrder` is empty this is a
+	 * pure filename sort — the initial seed. This is a read-only display
+	 * transform: it does not mutate `_prefs.cardOrders` or persist.
+	 */
 	private applyCardOrder(entries: BasesEntry[], savedOrder: string[]): BasesEntry[] {
 		const entryMap = new Map(entries.map((e) => [e.file.path, e]));
 		const ordered = savedOrder.map((p) => entryMap.get(p)).filter((e): e is BasesEntry => e !== undefined);
-		const unsaved = entries.filter((e) => !savedOrder.includes(e.file.path));
-		return [...ordered, ...unsaved];
+		const savedSet = new Set(savedOrder);
+		const fresh = entries
+			.filter((e) => !savedSet.has(e.file.path))
+			.sort((a, b) => a.file.basename.localeCompare(b.file.basename));
+		return [...fresh, ...ordered];
 	}
 
 	onClose(): void {

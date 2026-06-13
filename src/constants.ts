@@ -57,6 +57,7 @@ export const CSS_CLASSES = {
 	// Container
 	VIEW_CONTAINER: 'obk-view-container',
 	VIEW_CONTAINER_WITH_SWIMLANES: 'obk-view-container--with-swimlanes',
+	VIEW_CONTAINER_EDITING: 'obk-view-container--editing',
 	BOARD: 'obk-board',
 	BOARD_WITH_SWIMLANES: 'obk-board--with-swimlanes',
 	BOARD_CARD_DRAGGING: 'obk-board--card-dragging',

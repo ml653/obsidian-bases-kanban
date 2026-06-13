@@ -155,6 +155,23 @@
 	height: auto;
 }
 
+/* While inline-editing a card on mobile, the board is fitted to the space above
+   the keyboard. Shrink the column heights (stopgap) so they visibly shrink. Only
+   the column is capped; the body fills it via flex:1 and scrolls — capping the
+   body too would leave empty space below the cards. */
+.obk-view-container--editing .obk-column,
+.obk-view-container--editing.obk-view-container--with-swimlanes .obk-column {
+	max-height: 55%;
+	min-height: 0;
+}
+
+/* Swimlane mode releases the column-body overflow; let it scroll within the
+   now-capped column instead of overflowing. */
+.obk-view-container--editing.obk-view-container--with-swimlanes .obk-column-body {
+	overflow-y: auto;
+	min-height: 0;
+}
+
 /* Collapsed lane: cap the column body at about 30% less than the original
    420px height and scroll within the
    column. The lane and column themselves stay flexible — only the card
@@ -543,7 +560,10 @@
 @media (any-pointer: coarse) and (hover: none) {
 	.obk-card .obk-card-title-input {
 		padding: 6px 8px;
-		font-size: var(--font-text-size);
+		/* Never below 16px: iOS zooms the viewport in when focusing an input
+		   with a smaller font, which compounds the keyboard reflow. Mirrors the
+		   quick-add input. Larger user font sizes still apply. */
+		font-size: max(16px, var(--font-text-size));
 		line-height: var(--line-height-normal, 1.5);
 		-webkit-appearance: none;
 		appearance: none;

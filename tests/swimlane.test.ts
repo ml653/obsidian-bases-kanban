@@ -265,6 +265,48 @@ describe('Swimlane rendering behavior', () => {
 		assert.strictEqual(getToggleIcon(assigneeToggle), 'chevron-down');
 	});
 
+	test('collapsing a lane updates the DOM in-place without a board rebuild', () => {
+		const { view } = createSwimlaneView(() => swimlaneProperty);
+		triggerDataUpdate(view);
+
+		// Count actual board rebuilds. A collapse must update the lane element
+		// directly and must NOT rebuild the board when the config.set() that
+		// persists collapse state triggers a render via onDataUpdated().
+		let rebuilds = 0;
+		const v = view as any;
+		const originalFull = v.fullRebuild.bind(v);
+		const originalPatch = v.patchBoard.bind(v);
+		v.fullRebuild = (...args: unknown[]) => {
+			rebuilds += 1;
+			originalFull(...args);
+		};
+		v.patchBoard = (...args: unknown[]) => {
+			rebuilds += 1;
+			originalPatch(...args);
+		};
+
+		const highLane = getLane(view, 'High');
+		const toggle = highLane.querySelector<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_TOGGLE}`);
+		assert.ok(toggle, 'Expected collapse toggle to exist');
+
+		toggle.click();
+		// DOM is updated synchronously, in-place.
+		assert.ok(
+			highLane.classList.contains(CSS_CLASSES.SWIMLANE_COLLAPSED),
+			'Lane should be collapsed immediately after click',
+		);
+
+		// Model the config.set() -> onDataUpdated() render(s) that production
+		// fires. They must short-circuit on the unchanged render signature.
+		triggerDataUpdate(view);
+		triggerDataUpdate(view);
+		assert.strictEqual(rebuilds, 0, 'Collapse must not rebuild the board');
+		assert.ok(
+			highLane.classList.contains(CSS_CLASSES.SWIMLANE_COLLAPSED),
+			'Lane should remain collapsed after redundant renders',
+		);
+	});
+
 	test('swimlane card order is stored under the group plus swimlane property key', async () => {
 		const { view, controller } = createSwimlaneView(() => swimlaneProperty);
 		triggerDataUpdate(view);

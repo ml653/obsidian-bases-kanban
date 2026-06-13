@@ -159,6 +159,15 @@ export class KanbanView extends BasesView {
 	private _pendingCreatedFocusPath: string | null = null;
 	/** Path of a newly-created card to scroll into view without focusing (mobile). */
 	private _pendingCreatedScrollPath: string | null = null;
+	/**
+	 * Signature of the data + display options reflected in the current DOM.
+	 * render() skips all DOM work when the freshly-computed signature matches,
+	 * so purely-visual state that is applied directly to the DOM (e.g. swimlane
+	 * collapse) does not cause a board rebuild when its config.set() persistence
+	 * triggers one or more onDataUpdated() renders. Collapse state is
+	 * deliberately excluded from the signature.
+	 */
+	private _lastRenderSignature: string | null = null;
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, legacyData: LegacyData | null = null) {
 		super(controller);
@@ -369,7 +378,15 @@ export class KanbanView extends BasesView {
 		}
 	}
 
-	private render(): void {
+	/**
+	 * @param force When true, always reconcile the DOM, bypassing the render
+	 *   signature short-circuit. Imperative callers (drag snap-back, hide/unhide,
+	 *   error recovery) that mutate the DOM directly must force, since the data
+	 *   model — and therefore the signature — may be unchanged. The reactive
+	 *   debounced render leaves this false so config.set()-triggered renders that
+	 *   change nothing (e.g. swimlane collapse) are skipped.
+	 */
+	private render(force = false): void {
 		try {
 			const entries = this.data?.data || [];
 			const availablePropertyIds = this.allProperties || [];
@@ -522,6 +539,27 @@ export class KanbanView extends BasesView {
 			const existingIsSwimlane = existingBoard?.classList.contains(CSS_CLASSES.BOARD_WITH_SWIMLANES) ?? false;
 			const modeChanged = hasSwimlanes !== existingIsSwimlane;
 
+			// Skip all DOM work when nothing the board renders has actually
+			// changed. Purely-visual state applied directly to the DOM (swimlane
+			// collapse) is excluded from the signature, so the render(s) that its
+			// config.set() persistence triggers become no-ops instead of rebuilding
+			// every card and resetting scroll positions.
+			const optionsSignature = JSON.stringify([
+				currentOrderKey,
+				currentWrapValue,
+				currentCardTitlePropertyId,
+				currentImagePropertyId,
+				currentImageFit,
+				currentImageAspectRatio,
+				currentSwimlanePropertyId,
+				hasSwimlanes,
+			]);
+			const renderSignature = this._computeRenderSignature(orderedValues, lanes, hasSwimlanes, optionsSignature);
+			if (!force && existingBoard && !modeChanged && !groupChanged && renderSignature === this._lastRenderSignature) {
+				return;
+			}
+			this._lastRenderSignature = renderSignature;
+
 			if (!existingBoard || modeChanged || groupChanged || optionsChanged) {
 				this.fullRebuild(orderedValues, lanes, hasSwimlanes);
 			} else {
@@ -553,6 +591,8 @@ export class KanbanView extends BasesView {
 		this.destroySortables();
 		this._entryMap.clear();
 		this._cardFingerprints.clear();
+		// The board DOM is gone; force the next render() to rebuild.
+		this._lastRenderSignature = null;
 	}
 
 	private fullRebuild(
@@ -704,7 +744,7 @@ export class KanbanView extends BasesView {
 
 		this._prefs.columnOrder = order;
 		this._persistPrefs();
-		this.render();
+		this.render(true);
 	}
 
 	private patchBoard(
@@ -727,6 +767,16 @@ export class KanbanView extends BasesView {
 			const laneEl = body.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
 			const laneVal = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) ?? null;
 			if (colVal) scrollPositions.set(this.cardOrderKey(laneVal, colVal), body.scrollTop);
+		});
+
+		// Re-appending columns into a swimlane body resets its horizontal scroll,
+		// which is jarring (the lane jumps back to the left). Capture scrollLeft
+		// per lane and restore it alongside the column scrollTop.
+		const laneScrollLeft = new Map<string, number>();
+		boardEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`).forEach((body) => {
+			const laneEl = body.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
+			const laneVal = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE);
+			if (laneVal !== null && laneVal !== undefined) laneScrollLeft.set(laneVal, body.scrollLeft);
 		});
 
 		if (hasSwimlanes) {
@@ -816,6 +866,18 @@ export class KanbanView extends BasesView {
 			this._patchColumns(boardEl, orderedColumnValues, colEntries, null);
 		}
 
+		// Restore lane horizontal scroll synchronously so the board doesn't visibly
+		// jump to the left for a frame before the deferred restore below. Widths are
+		// stable here, so scrollLeft is not clamped the way scrollTop can be.
+		boardEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`).forEach((body) => {
+			const laneEl = body.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
+			const laneVal = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE);
+			if (laneVal !== null && laneVal !== undefined) {
+				const left = laneScrollLeft.get(laneVal);
+				if (left !== undefined) body.scrollLeft = left;
+			}
+		});
+
 		// Defer scroll restoration to the next frame so layout has finalized.
 		// Synchronous scrollTop assignment can be clamped when a transient layout
 		// pass reports a smaller scrollHeight (e.g. image-backed cards not yet laid out).
@@ -829,6 +891,14 @@ export class KanbanView extends BasesView {
 					if (colVal) {
 						const top = scrollPositions.get(this.cardOrderKey(laneVal, colVal));
 						if (top !== undefined) body.scrollTop = top;
+					}
+				});
+				boardEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.SWIMLANE_BODY}`).forEach((body) => {
+					const laneEl = body.closest<HTMLElement>(`.${CSS_CLASSES.SWIMLANE}`);
+					const laneVal = laneEl?.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE);
+					if (laneVal !== null && laneVal !== undefined) {
+						const left = laneScrollLeft.get(laneVal);
+						if (left !== undefined) body.scrollLeft = left;
 					}
 				});
 			} catch (error) {
@@ -938,6 +1008,41 @@ export class KanbanView extends BasesView {
 		return computeCardFingerprint(entry, this._buildCardCtx());
 	}
 
+	/**
+	 * Build a string that captures everything the board DOM reflects: display
+	 * options, column/lane order, per-cell card identity+content, colors and
+	 * hidden columns. Collapse state is intentionally omitted because it is
+	 * applied directly to the DOM, so a collapse-only change yields an identical
+	 * signature and render() skips the rebuild.
+	 */
+	private _computeRenderSignature(
+		orderedColumnValues: string[],
+		lanes: Map<string | null, Map<string, BasesEntry[]>>,
+		hasSwimlanes: boolean,
+		optionsSignature: string,
+	): string {
+		const cardCtx = this._buildCardCtx();
+		const parts: string[] = [optionsSignature];
+		parts.push(`cols:${orderedColumnValues.join('\x1f')}`);
+		parts.push(`colors:${JSON.stringify(this._prefs.columnColors)}`);
+		parts.push(`hidden:${Array.from(this._prefs.hiddenColumns).sort().join('\x1f')}`);
+
+		const laneKeys = hasSwimlanes
+			? this.getOrderedSwimlaneValues([...lanes.keys()].filter((k): k is string => k !== null))
+			: [null];
+		for (const laneKey of laneKeys) {
+			parts.push(`lane:${laneKey ?? ''}`);
+			const columns = lanes.get(laneKey) ?? new Map<string, BasesEntry[]>();
+			for (const colValue of orderedColumnValues) {
+				parts.push(`col:${colValue}`);
+				for (const entry of columns.get(colValue) ?? []) {
+					parts.push(`${entry.file.path}=${computeCardFingerprint(entry, cardCtx)}`);
+				}
+			}
+		}
+		return parts.join('\n');
+	}
+
 	private patchColumnCards(columnEl: HTMLElement, newEntries: BasesEntry[]): void {
 		patchColumnCardsEl(columnEl, newEntries, this._buildColumnCtx(), this._buildColumnCallbacks());
 	}
@@ -1006,6 +1111,9 @@ export class KanbanView extends BasesView {
 		else this._prefs.collapsedLanes.delete(laneValue);
 		laneEl.classList.toggle(CSS_CLASSES.SWIMLANE_COLLAPSED, willCollapse);
 		updateSwimlaneToggleEl(toggleBtn, willCollapse);
+		// The collapse is already reflected in the DOM above. Persisting only
+		// writes collapsedLanes to config; any render that config.set() triggers
+		// is a no-op because collapse state is excluded from the render signature.
 		this._persistPrefs();
 	}
 
@@ -1088,6 +1196,7 @@ export class KanbanView extends BasesView {
 			},
 			onUpdateFilenameProperty: (file, newTitle) => this.updateFilenameProperty(file, newTitle),
 			onDeleteCard: (file) => this.confirmDeleteCard(file),
+			onBeginInlineEdit: (editingEl) => this._fitBoardToKeyboard(editingEl),
 		};
 	}
 
@@ -1369,7 +1478,7 @@ export class KanbanView extends BasesView {
 		}
 		this._persistPrefs();
 		// Rebuild so unhidden columns get their card body populated.
-		this.render();
+		this.render(true);
 	}
 
 	private attachCardSortable(body: HTMLElement, value: string): void {
@@ -1471,7 +1580,7 @@ export class KanbanView extends BasesView {
 				if (this.didSortableIndexChange(evt)) {
 					new Notice(SORTED_CARD_ORDER_NOTICE, 4000);
 				}
-				this.render();
+				this.render(true);
 				return;
 			}
 			this._prefs.cardOrders[newKey] = getColumnPaths(evt.to);
@@ -1533,7 +1642,7 @@ export class KanbanView extends BasesView {
 			});
 		} catch (error) {
 			console.error('Error updating entry property:', error);
-			this.render();
+			this.render(true);
 		}
 	}
 
@@ -1568,7 +1677,7 @@ export class KanbanView extends BasesView {
 			});
 		} catch (error) {
 			console.error('Error moving card via keyboard:', error);
-			this.render();
+			this.render(true);
 		}
 	}
 
@@ -1719,6 +1828,83 @@ export class KanbanView extends BasesView {
 			restored = true;
 			vv?.removeEventListener('resize', reassert);
 			vv?.removeEventListener('scroll', reassert);
+			timers.forEach((t) => window.clearTimeout(t));
+			for (const s of saved) {
+				s.el.style.height = s.height;
+				s.el.style.maxHeight = s.maxHeight;
+				s.el.style.minHeight = s.minHeight;
+			}
+		};
+	}
+
+	/**
+	 * Fit the board into the space above the on-screen keyboard while inline
+	 * editing a card, then keep the edited field scrolled into view.
+	 *
+	 * Unlike `_lockBoardHeightForModal` (which freezes the board at full height so
+	 * a floating modal can overlay it), inline editing happens *inside* the board,
+	 * so the board must shrink to the visible region — otherwise the edited card
+	 * can sit behind the keyboard with no way to scroll to it. We size our
+	 * container, the leaf scroll element, and the leaf-content ancestor so their
+	 * bottoms meet the top of the keyboard (the visualViewport bottom), re-fitting
+	 * on every visualViewport change, and scroll the edited field into view.
+	 * Restores the original styles when editing ends.
+	 *
+	 * No-op off mobile.
+	 *
+	 * @param focusEl The element to keep visible above the keyboard.
+	 */
+	private _fitBoardToKeyboard(focusEl: HTMLElement): () => void {
+		const vv = window.visualViewport;
+		if (!Platform.isMobile || !vv) return () => {};
+
+		const container = this.containerEl;
+		const scrollEl = this.scrollEl;
+		const targets: HTMLElement[] = [container, scrollEl];
+		const leafContent = scrollEl.closest<HTMLElement>('.workspace-leaf-content, .view-content');
+		if (leafContent && !targets.includes(leafContent)) targets.push(leafContent);
+
+		const saved = targets.map((el) => ({
+			el,
+			height: el.style.height,
+			maxHeight: el.style.maxHeight,
+			minHeight: el.style.minHeight,
+		}));
+
+		// Shrink the columns (halved, for now) so the board fits the reduced
+		// space above the keyboard instead of overflowing behind it.
+		container.classList.add(CSS_CLASSES.VIEW_CONTAINER_EDITING);
+
+		const fit = () => {
+			// The visible region spans [vv.offsetTop, vv.offsetTop + vv.height].
+			// Size each element so its bottom meets the keyboard top.
+			const visibleBottom = (vv.offsetTop ?? 0) + vv.height;
+			// Read all tops before writing any heights so a height change doesn't
+			// perturb the next element's measurement mid-loop.
+			const tops = targets.map((el) => el.getBoundingClientRect().top);
+			targets.forEach((el, i) => {
+				const avail = Math.round(visibleBottom - tops[i]);
+				if (avail <= 0) return;
+				const px = `${avail}px`;
+				el.style.height = px;
+				el.style.maxHeight = px;
+				el.style.minHeight = px;
+			});
+			focusEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+		};
+
+		vv.addEventListener('resize', fit);
+		vv.addEventListener('scroll', fit);
+		// The keyboard animates open over a few frames; re-fit as it settles.
+		const timers = [0, 50, 150, 300, 600].map((d) => window.setTimeout(fit, d));
+
+		let restored = false;
+		return () => {
+			if (restored) return;
+			restored = true;
+			container.classList.remove(CSS_CLASSES.VIEW_CONTAINER_EDITING);
+			vv.removeEventListener('resize', fit);
+			vv.removeEventListener('scroll', fit);
 			timers.forEach((t) => window.clearTimeout(t));
 			for (const s of saved) {
 				s.el.style.height = s.height;

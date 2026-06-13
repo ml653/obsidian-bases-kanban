@@ -23,6 +23,13 @@ export interface CardCallbacks {
 	onFocusCard: (path: string) => void;
 	onUpdateFilenameProperty: (file: TFile, newTitle: string) => Promise<void>;
 	onDeleteCard: (file: TFile) => void;
+	/**
+	 * Called when inline title editing begins, with the edit field as argument.
+	 * Returns a cleanup function invoked when editing ends. Used on mobile to fit
+	 * the board into the space above the soft keyboard and keep the edited field
+	 * scrolled into view.
+	 */
+	onBeginInlineEdit?: (editingEl: HTMLElement) => () => void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -173,9 +180,15 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		input.select();
 		autoSize();
 
+		// On mobile, fit the board above the soft keyboard and keep this field
+		// in view so it isn't hidden behind the keyboard (no-op elsewhere).
+		// Released in finish().
+		const unlockHeight = cb.onBeginInlineEdit?.(input) ?? (() => {});
+
 		const finish = () => {
 			if (!isEditing) return;
 			isEditing = false;
+			unlockHeight();
 			input.remove();
 			cardEl.classList.remove(CSS_CLASSES.CARD_EDITING);
 			cardEl.focus({ preventScroll: true });

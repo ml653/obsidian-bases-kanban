@@ -272,7 +272,7 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 		getMostRecentLeaf: MockFn;
 		mostRecentLeaf: unknown;
 	};
-	fileManager: { processFrontMatter: MockFn; renameFile: MockFn };
+	fileManager: { processFrontMatter: MockFn; renameFile: MockFn; trashFile: MockFn };
 } {
 	const openLinkText = createMockFn();
 	const trigger = createMockFn();
@@ -297,6 +297,7 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 	) as MockFn;
 	const processFrontMatter = createMockFn();
 	const renameFile = createMockFn();
+	const trashFile = createMockFn();
 	const markdownFiles: any[] = [];
 
 	return {
@@ -307,12 +308,14 @@ export function createMockApp(imageFiles: Record<string, { path: string }> = {})
 			openFile,
 			setActiveLeaf,
 			getMostRecentLeaf,
+			revealLeaf: async (): Promise<void> => {},
 			mostRecentLeaf,
 			getActiveFile: (): null => null,
 		} as any,
 		fileManager: {
 			processFrontMatter,
 			renameFile,
+			trashFile,
 		} as any,
 		metadataCache: {
 			getFirstLinkpathDest: (linkpath: string, _sourcePath: string) => imageFiles[linkpath] ?? null,

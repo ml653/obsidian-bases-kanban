@@ -3037,7 +3037,7 @@ describe('Card Order - Persistence', () => {
 		assert.strictEqual(cardPaths[1], 'Task 1.md', 'Second card should be Task 1 per saved order');
 	});
 
-	test('Cards not in saved order appear at the end', () => {
+	test('Cards not in saved order appear at the front', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -3057,8 +3057,8 @@ describe('Card Order - Persistence', () => {
 		) as HTMLElement;
 		const cardPaths = Array.from(toDoColumn.querySelectorAll('.obk-card')).map((c) => c.getAttribute('data-entry-path'));
 
-		assert.strictEqual(cardPaths[0], 'Task 2.md', 'Saved card should be first');
-		assert.strictEqual(cardPaths[1], 'Task 1.md', 'Unsaved card should appear at the end');
+		assert.strictEqual(cardPaths[0], 'Task 1.md', 'Unsaved card should appear at the front');
+		assert.strictEqual(cardPaths[1], 'Task 2.md', 'Saved card should follow');
 	});
 
 	test('Regression: re-render after same-column drag preserves dragged order', async () => {
@@ -3668,16 +3668,17 @@ describe('applyCardOrder', () => {
 		assert.strictEqual(result[2].file.path, 'c.md');
 	});
 
-	test('unsaved entries are appended at the end in original array order', () => {
+	test('unsaved entries are prepended at the front, sorted by filename', () => {
 		const a = createMockBasesEntry(createMockTFile('a.md'), {});
 		const b = createMockBasesEntry(createMockTFile('b.md'), {});
 		const c = createMockBasesEntry(createMockTFile('c.md'), {});
 
 		const result = view.applyCardOrder([c, b, a], ['a.md']);
 
-		assert.strictEqual(result[0].file.path, 'a.md');
+		// New (b, c) cards are prepended in filename order; saved 'a.md' follows.
+		assert.strictEqual(result[0].file.path, 'b.md');
 		assert.strictEqual(result[1].file.path, 'c.md');
-		assert.strictEqual(result[2].file.path, 'b.md');
+		assert.strictEqual(result[2].file.path, 'a.md');
 	});
 
 	test('unknown paths in savedOrder are silently ignored', () => {
@@ -3814,8 +3815,10 @@ describe('patchColumnCards - _dragging flag', () => {
 		setupKanbanViewWithApp(view, app);
 		triggerDataUpdate(view);
 
-		// Trigger patch with reversed order
-		controller.data.data = [b, a];
+		// With no saved order the seed is filename order [a, b]. Impose a manual
+		// order [b, a] and re-render (not dragging) — the patch must reorder the
+		// existing DOM to match.
+		(view as any)._prefs.cardOrders['To Do'] = ['b.md', 'a.md'];
 		(view as any)._dragging = false;
 		triggerDataUpdate(view);
 
@@ -3935,5 +3938,69 @@ describe('patchColumnCards - property value reactivity', () => {
 
 		const countEl = view.containerEl.querySelector('.obk-column-count');
 		assert.strictEqual(countEl?.textContent, '1', 'Column count should remain 1 after a property-only update');
+	});
+});
+
+describe('Card order persistence (reference-aliasing regression)', () => {
+	let scrollEl: HTMLElement;
+	let controller: any;
+	let app: any;
+
+	beforeEach(() => {
+		scrollEl = createDivWithMethods();
+		controller = createMockQueryController(createEntriesWithStatus(), TEST_PROPERTIES);
+		app = createMockApp();
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+	});
+
+	test('repeated in-column reorders each persist to config (no skipped writes)', () => {
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		// Spy on config.set, recording a deep snapshot of cardOrders at each write
+		// so we model real disk serialization (independent of later mutations).
+		const cardOrderWrites: string[][] = [];
+		const realSet = controller.config.set.bind(controller.config);
+		controller.config.set = (key: string, value: unknown) => {
+			if (key === 'cardOrders') {
+				const order = (value as any)?.[PROPERTY_STATUS]?.['To Do'];
+				if (Array.isArray(order)) cardOrderWrites.push([...order]);
+			}
+			realSet(key, value);
+		};
+
+		const prefs = (view as any)._prefs;
+
+		// First reorder (in-place mutation, mirrors reorderCardInColumn).
+		prefs.cardOrders['To Do'] = ['b.md', 'a.md', 'c.md'];
+		(view as any)._persistPrefs();
+
+		// Second reorder — the case the aliasing bug silently dropped.
+		prefs.cardOrders['To Do'] = ['c.md', 'b.md', 'a.md'];
+		(view as any)._persistPrefs();
+
+		assert.strictEqual(cardOrderWrites.length, 2, 'both reorders should call config.set for cardOrders');
+		assert.deepStrictEqual(
+			cardOrderWrites[1],
+			['c.md', 'b.md', 'a.md'],
+			'the second reorder must persist its new order to config',
+		);
+	});
+
+	test('persisted cardOrders is independent of _prefs (deep copy, not shared reference)', () => {
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const prefs = (view as any)._prefs;
+		prefs.cardOrders['To Do'] = ['x.md', 'y.md'];
+		(view as any)._persistPrefs();
+
+		// Mutating _prefs in place must NOT leak into the stored config snapshot.
+		prefs.cardOrders['To Do'].push('z.md');
+		const stored = controller.config.get('cardOrders')?.[PROPERTY_STATUS]?.['To Do'];
+		assert.deepStrictEqual(stored, ['x.md', 'y.md'], 'stored config must not share a reference with _prefs');
 	});
 });

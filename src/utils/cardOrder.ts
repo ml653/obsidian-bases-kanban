@@ -75,6 +75,19 @@ export function moveToFront(orders: CardOrders, key: string, path: string): void
 }
 
 /**
+ * Find which column a path is currently listed in and at what index.
+ * Returns `{ column: null, index: -1 }` when the path is not present anywhere.
+ * Used only for diagnostic before/after logging.
+ */
+function locatePath(orders: CardOrders, path: string): { column: string | null; index: number } {
+	for (const [column, list] of Object.entries(orders)) {
+		const index = list.indexOf(path);
+		if (index !== -1) return { column, index };
+	}
+	return { column: null, index: -1 };
+}
+
+/**
  * Everything the card-move functions need from the view. Keeping DOM/app/prefs
  * access behind this seam lets the move logic live here without `cardOrder.ts`
  * depending on the KanbanView class.
@@ -111,13 +124,30 @@ export async function moveCardToColumn(ctx: CardMoveContext, entryPath: string, 
 	const entry = ctx.entryMap.get(entryPath);
 	if (!entry) return;
 
+	// Capture before-state for diagnostics.
+	const cardEl = ctx.findCardEl(entryPath);
+	const before = locatePath(ctx.cardOrders, entryPath);
+
 	// Preserve focus on this card after the re-render triggered by the write.
 	ctx.setKeyboardFocusPath(entryPath);
 
 	// Prepend to the destination column's saved order (removing it from its old
 	// column first, so it never ends up listed in two columns) and persist now —
 	// an explicit ordering event, not a render-time write.
-	moveToFront(ctx.cardOrders, ctx.cardOrderKey(null, newColumnValue), entryPath);
+	const newKey = ctx.cardOrderKey(null, newColumnValue);
+	moveToFront(ctx.cardOrders, newKey, entryPath);
+	const after = locatePath(ctx.cardOrders, entryPath);
+
+	// eslint-disable-next-line obsidianmd/rule-custom-message -- temporary debug logging
+	console.log('[obk] moveCardToColumn', {
+		cardFilename: entry.file.basename,
+		attributeFilename: cardEl?.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) ?? entryPath,
+		columnBefore: before.column,
+		columnAfter: after.column,
+		indexBefore: before.index,
+		indexAfter: after.index,
+	});
+
 	ctx.persistPrefs();
 
 	const columnPropertyName = parsePropertyId(ctx.prefsPropertyId).name;
@@ -178,6 +208,16 @@ export function reorderCardInColumn(
 	const newOrder = Array.from(body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`))
 		.map((c) => c.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH))
 		.filter((p): p is string => p !== null);
+
+	// eslint-disable-next-line obsidianmd/rule-custom-message -- temporary debug logging
+	console.log('[obk] reorderCardInColumn', {
+		cardFilename: ctx.entryMap.get(entryPath)?.file.basename ?? entryPath,
+		attributeFilename: cardEl.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) ?? entryPath,
+		columnBefore: columnValue,
+		columnAfter: columnValue,
+		indexBefore: idx,
+		indexAfter: newOrder.indexOf(entryPath),
+	});
 
 	ctx.cardOrders[ctx.cardOrderKey(swimlaneValue, columnValue)] = newOrder;
 	ctx.persistPrefs();

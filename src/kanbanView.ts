@@ -383,7 +383,13 @@ export class KanbanView extends BasesView {
 		const raw = this.config?.get(key);
 		const all: Record<string, T> = guard(raw) ? raw : {};
 		if (JSON.stringify(all[storageKey]) !== JSON.stringify(newValue)) {
-			this.config?.set(key, { ...all, [storageKey]: newValue });
+			// Deep-clone so the stored config never shares references with
+			// `_prefs`. Otherwise later in-place mutations of `_prefs.cardOrders`
+			// (e.g. an in-column reorder) would also mutate the value held by the
+			// config, defeating the change guard above on the next persist and
+			// silently dropping the write.
+			const next: Record<string, T> = { ...all, [storageKey]: newValue };
+			this.config?.set(key, JSON.parse(JSON.stringify(next)));
 		}
 	}
 
@@ -1691,6 +1697,19 @@ export class KanbanView extends BasesView {
 
 		const newKey = this.cardOrderKey(newLaneValue, newColumnValue);
 		const sortActive = this.hasActiveSort();
+
+		// eslint-disable-next-line obsidianmd/rule-custom-message -- temporary debug logging
+		console.log('[obk] handleCardDrop (drag complete)', {
+			cardFilename: this._entryMap.get(entryPath)?.file.basename ?? entryPath,
+			attributeFilename: cardEl.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH) ?? entryPath,
+			columnBefore: oldColumnValue,
+			columnAfter: newColumnValue,
+			laneBefore: oldLaneValue,
+			laneAfter: newLaneValue,
+			indexBefore: evt.oldIndex,
+			indexAfter: evt.newIndex,
+			sortActive,
+		});
 
 		// Same cell reorder
 		if (oldLaneValue === newLaneValue && oldColumnValue === newColumnValue) {
